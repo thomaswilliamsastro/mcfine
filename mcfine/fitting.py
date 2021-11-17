@@ -7,7 +7,7 @@ from functools import partial
 
 import astropy.units as u
 import emcee
-import ndradex
+import ndradexhyperfine as ndradex
 import numpy as np
 from lmfit import minimize, Parameters
 from scipy.interpolate import RegularGridInterpolator
