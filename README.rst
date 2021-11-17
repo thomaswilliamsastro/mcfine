@@ -2,9 +2,12 @@
 McFine: A tool for hyperfine spectral line fitting
 ##################################################
 
-[![](https://img.shields.io/pypi/v/mcfine.svg?label=PyPI&style=flat-square)](https://pypi.org/pypi/mcfine/)
-[![](https://img.shields.io/pypi/pyversions/mcfine.svg?label=Python&color=yellow&style=flat-square)](https://pypi.org/pypi/mcfine/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg?label=License&style=flat-square)](LICENSE)
+.. image:: https://img.shields.io/pypi/v/mcfine.svg?label=PyPI&style=flat-square
+   :target: https://pypi.org/pypi/mcfine/
+.. image:: https://img.shields.io/pypi/pyversions/mcfine.svg?label=Python&color=yellow&style=flat-square
+   :target: https://pypi.org/pypi/mcfine/
+.. image:: https://img.shields.io/badge/license-GNUv3-blue.svg?label=License&style=flat-square
+   :target: LICENSE
 
 A python package for complex, multi-component hyperfine spectra fitting in astronomical data.
 
