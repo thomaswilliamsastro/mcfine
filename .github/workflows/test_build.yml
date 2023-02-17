@@ -15,13 +15,18 @@ jobs:
     strategy:
       matrix:
         # Versions listed at https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json
-        python-version: [3.8.16, 3.9.16, 3.10.10, 3.11.2]
+        python-version: [3.7.15,
+                         3.8.16,
+                         3.9.16,
+                         3.10.10,
+                         3.11.2,
+        ]
     steps:
       - uses: actions/checkout@v3
         with:
           submodules: true
       - name: Setup Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies

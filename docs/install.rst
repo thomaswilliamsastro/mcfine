@@ -8,7 +8,7 @@ Requirements
 
 McFine requires (the brackets indicate the version tested on, earlier versions may work but not explicitly supported):
 
-* python (>=3.9)
+* python (>=3.7)
 * astropy (>=4.3.1)
 * emcee (3.1.1)
 * lmfit (1.0.3)
