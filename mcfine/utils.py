@@ -1,3 +1,5 @@
+import os.path
+
 import pickle
 
 
@@ -66,6 +68,10 @@ def save_fit_dict(fit_dict,
         file_name (str): file to save to
 
     """
+
+    fit_dir = os.path.dirname(file_name)
+    if not os.path.exists(fit_dir):
+        os.makedirs(fit_dir)
 
     with open(file_name, 'wb') as f:
         pickle.dump(fit_dict, f)

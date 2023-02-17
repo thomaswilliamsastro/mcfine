@@ -962,7 +962,7 @@ class HyperfineFitter:
         cube_fit_dict_filename = fit_dict_filename + '_%s_%s' % (i, j)
 
         if not os.path.exists(cube_fit_dict_filename + '.pkl') or overwrite:
-            self.logger.info('Fitting %s, %s' % (i, j))
+            self.logger.debug('Fitting %s, %s' % (i, j))
             data = self.data[:, i, j]
             error = self.error[:, i, j]
 
@@ -978,16 +978,16 @@ class HyperfineFitter:
                             'likelihood': likelihood,
                             }
 
-                save_fit_dict(fit_dict, fit_dict_filename + '.pkl')
+                save_fit_dict(fit_dict, cube_fit_dict_filename + '.pkl')
 
         else:
 
-            fit_dict = load_fit_dict(fit_dict_filename + '.pkl')
+            fit_dict = load_fit_dict(cube_fit_dict_filename + '.pkl')
 
             n_comp = fit_dict['n_comp']
             likelihood = fit_dict['likelihood']
 
-        self.logger.info('N components: %d, likelihood: %.2f' % (n_comp, likelihood))
+        self.logger.debug('N components: %d, likelihood: %.2f' % (n_comp, likelihood))
 
         return n_comp, likelihood
 
@@ -1215,12 +1215,15 @@ class HyperfineFitter:
                         for key in config_dict['lmfit']:
                             kwargs[key] = config_dict['lmfit'][key]
 
+                # Filter out any NaNs
+                good_idx = np.where(~np.isnan(data))
+
                 lmfit_result = minimize(
                     fcn=initial_lmfit,
                     params=params,
-                    args=(data,
-                          error,
-                          self.vel,
+                    args=(data[good_idx],
+                          error[good_idx],
+                          self.vel[good_idx],
                           self.strength_lines,
                           self.v_lines,
                           self.props,
@@ -1527,15 +1530,17 @@ class HyperfineFitter:
             np.save(n_comp_output_filename, n_comp)
             np.save(likelihood_output_filename, likelihood)
 
-    def get_fits_from_samples(self, samples, vel, n_draws=100, n_comp=1):
+    def get_fits_from_samples(self,
+                              samples,
+                              vel,
+                              n_draws=100,
+                              n_comp=1,
+                              ):
         """TODO: Docstring
 
         """
 
         fit_lines = np.zeros([len(vel), n_draws, n_comp])
-
-        if self.fit_type == 'radex':
-            qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
 
         for draw in range(n_draws):
             sample = np.random.randint(low=0, high=samples.shape[0])
@@ -1548,6 +1553,8 @@ class HyperfineFitter:
                                                                     vel=vel)
 
                 elif self.fit_type == 'radex':
+
+                    qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
 
                     fit_lines[:, draw, i] = get_hyperfine_multiple_components(theta_draw, vel, self.v_lines, qn_ul)
 
