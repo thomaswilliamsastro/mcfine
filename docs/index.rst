@@ -10,6 +10,7 @@
    :caption: Documentation
 
    install
+   tutorial_generating_a_spectrum
    tutorial_fitting_a_spectrum
    changelog
    reference_api
@@ -19,7 +20,7 @@ Developers
 
 This package has been developed by:
 
-* Thomas Williams (MPIA)
+* Thomas Williams (Oxford)
 * Elizabeth Watkins (ARI/ZAH)
 
 Citing McFine

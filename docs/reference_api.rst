@@ -29,3 +29,10 @@ HyperfinePlotter
 
 .. autoclass:: mcfine.plotting.HyperfinePlotter
     :members:
+
+=========
+Utilities
+=========
+
+.. automodule:: mcfine.utils
+    :members:

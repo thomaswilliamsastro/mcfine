@@ -1,0 +1,8 @@
+[local]
+
+radex_datafile = 'n2h+_hfs.dat'
+
+fit_dir = 'fit'
+plot_dir = 'plot'
+
+n_cores = ''
