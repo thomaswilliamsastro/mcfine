@@ -50,6 +50,9 @@ master_doc = 'index'
 
 todo_include_todos = True
 
+# Exclude ndradex, which causes errors
+autodoc_mock_imports = ['ndradexhyperfine']
+
 
 # -- Options for HTML output -------------------------------------------------
 
