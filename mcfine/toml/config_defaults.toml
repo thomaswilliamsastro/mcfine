@@ -1,0 +1,47 @@
+[fitting_params]
+fit_type = 'lte'
+fit_method = 'mcmc'
+
+line = 'n2hp10'
+rest_freq = ''
+
+[generate_radex_grid]  # TODO
+
+
+[multicomponent_fitter]
+fit_dict_filename = 'fit_dict'
+n_comp_filename = 'n_comp'
+likelihood_filename = 'likelihood'
+save = true
+progress = true
+
+[initial_guess]
+
+lte = [15, 0, 0, 0.5]
+radex = [20, 14, 6, 0, 0.5]
+
+[lmfit]
+method = 'basinhopping'
+
+[mcmc]
+
+delta_bic_cutoff = 10
+n_walkers = 100
+n_steps = 1000
+
+[overwrites]
+
+generate_radex_grid = false
+multicomponent_fitter = false
+
+[plotting]
+
+show_individual_components = true
+show_hyperfine_components = false
+n_points = 1000
+n_draws = 100
+figsize = [10, 4]
+x_label = 'Velocity (km s$^{-1}$)'
+y_label='Intensity (K)'
+file_exts = ['png', 'pdf']
+chunksize = 1
