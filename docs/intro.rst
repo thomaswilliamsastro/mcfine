@@ -6,7 +6,7 @@ McFine: A tool for hyperfine spectral line fitting
    :target: https://pypi.org/pypi/mcfine/
 .. image:: https://img.shields.io/pypi/pyversions/mcfine.svg?label=Python&color=yellow&style=flat-square
    :target: https://pypi.org/pypi/mcfine/
-.. image:: https://img.shields.io/github/workflow/status/thomaswilliamsastro/mcfine/Test?logo=github&label=Test&style=flat-square
+.. image:: https://img.shields.io/github/actions/workflow/status/thomaswilliamsastro/mcfine/test_build.yml?branch=main
    :target: https://github.com/thomaswilliamsastro/mcfine/actions
 .. image:: https://readthedocs.org/projects/mcfine/badge/?version=latest&style=flat-square
    :target: https://mcfine.readthedocs.io/en/latest/
