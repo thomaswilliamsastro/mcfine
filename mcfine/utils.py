@@ -1,6 +1,54 @@
-import os.path
+import os
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 import pickle
+
+CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
+LOCAL_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'local_defaults.toml')
+
+
+def print_config_params():
+    """Print out all config parameters, and default values.
+
+    """
+
+    with open(CONFIG_DEFAULT_PATH, 'rb') as f:
+        config_defaults = tomllib.load(f)
+    with open(LOCAL_DEFAULT_PATH, 'rb') as f:
+        local_defaults = tomllib.load(f)
+
+    print('Config Defaults:\n')
+
+    for table in config_defaults.keys():
+
+        print('[%s]' % table)
+
+        for key in config_defaults[table].keys():
+
+            value = config_defaults[table][key]
+            value_type = type(value)
+
+            print('--%s\n----default: %s, type: %s' % (key, value, value_type))
+
+        print('\n')
+
+    print('Local Defaults:\n')
+
+    for table in local_defaults.keys():
+
+        print('[%s]' % table)
+
+        for key in local_defaults[table].keys():
+            value = local_defaults[table][key]
+            value_type = type(value)
+
+            print('--%s\n----default: %s, type: %s' % (key, value, value_type))
+
+        print('\n')
 
 
 def get_dict_val(val_dict,

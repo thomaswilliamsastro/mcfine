@@ -53,12 +53,16 @@ mp.set_start_method('fork')
 def round_nearest(x,
                   a,
                   ):
+    """TODO"""
+
     return round(round(x / a) * a, -int(np.floor(np.log10(a))))
 
 
 def get_nearest_value(data,
                       value,
                       ):
+    """TODO"""
+
     # Find the nearest below and above
     diff = data - value
     less = np.where(diff <= 0)
@@ -91,6 +95,8 @@ def get_nearest_values(dataset,
                        keys,
                        values,
                        ):
+    """TODO"""
+
     nearest_values_list = [get_nearest_value(dataset[keys[i]].values, values[i])
                            for i in range(len(values))]
 
@@ -179,7 +185,7 @@ def hyperfine_structure_lte(t_ex,
     Args:
         t_ex (float): Excitation temperature (K).
         tau (float): Total optical depth of the line.
-        v_centre (float): Central velocity of strongest component (km/s).
+        v_centre (float): Central velocity of the strongest component (km/s).
         line_width (float): Width of components (assumed to be the same for each hyperfine component; km/s).
         return_hyperfine_components (bool): Return the intensity for each hyperfine component. Defaults to False.
 
@@ -215,6 +221,8 @@ def hyperfine_structure_radex(t_ex,
                               vel,
                               return_hyperfine_components=False,
                               ):
+    """TODO"""
+
     tau_components = gaussian(vel[:, np.newaxis], tau, v_lines + v_centre,
                               line_width)
 
@@ -285,6 +293,8 @@ def get_hyperfine_multiple_components(theta,
                                       v_lines,
                                       qn_ul,
                                       ):
+    """TODO"""
+
     # Important point here, RADEX uses a square profile so transform the sigma into the right width. Pull out
     # the subset of data around our values
 
@@ -299,6 +309,8 @@ def radex_grid_interp(theta,
                       qn_ul,
                       labels=None,
                       ):
+    """TODO"""
+
     if labels is None:
         labels = ['T_kin', 'N_mol', 'n_H2', 'dv']
 
@@ -306,7 +318,7 @@ def radex_grid_interp(theta,
         radex_grid, labels,
         [theta[0], 10 ** theta[1], 10 ** theta[2], theta[4] * 2.355])
 
-    # Pull out grid subset of nearest values
+    # Pull out grid subset of the nearest values
     grid_subset = radex_grid.sel(T_kin=nearest_values[0], N_mol=nearest_values[1], n_H2=nearest_values[2],
                                  dv=nearest_values[3])
     tau_subset = grid_subset['tau'].values
@@ -354,6 +366,8 @@ def initial_lmfit(params,
                   fit_type='lte',
                   log_tau=True,
                   ):
+    """TODO"""
+
     theta = np.array([params[key].value for key in params])
 
     intensity_model = multiple_components(theta, vel, strength_lines, v_lines, props, n_comp=n_comp, fit_type=fit_type,
@@ -460,14 +474,14 @@ def ln_prior(theta,
 
         dv = np.abs(np.nanmedian(np.diff(vel)))
 
-        # Insist on monotonically increasing velocity components TODO?, and separated by at least one channel
+        # Insist on monotonically increasing velocity components
         v_idx = np.where(np.asarray(props) == 'v')[0][0]
 
         vels = np.array([theta[prop_len * i + v_idx] for i in range(n_comp)])
         vel_diffs = np.diff(vels)
 
+        # Make sure components are separated by at least one channel
         if np.any(vel_diffs < dv):
-            # if np.any(vel_diffs < 0):
             return -np.inf
 
     return 0
@@ -755,30 +769,19 @@ class HyperfineFitter:
         self.max_n_comp = None
 
     def generate_radex_grid(self,
-                            output_file='radex_output.nc',
-                            t_kin=None,
-                            t_kin_step=5,
+                            # output_file='radex_output.nc',
+                            # t_kin=None,
+                            # t_kin_step=5,
                             n_mol=None,
                             n_mol_step=0.2,
                             n_h2=None,
                             n_h2_step=0.2,
                             dv=None,
                             dv_step=1,
-                            geom='uni',
-                            progress=True,
+                            # geom='uni',
+                            # progress=True,
                             ):
         """TODO: This needs to be optimized. Doesn't matter if the grid is kinda massive so long as it works, hey
-
-        Args:
-            output_file:
-            t_kin:
-            t_kin_step:
-            n_mol:
-            n_mol_step:
-            n_h2:
-            n_h2_step:
-            dv:
-            dv_step:
 
         """
 
@@ -848,6 +851,13 @@ class HyperfineFitter:
                                              logger=self.logger,
                                              )
 
+        chunksize = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='multicomponent_fitter',
+                                 key='chunksize',
+                                 logger=self.logger,
+                                 )
+
         progress = get_dict_val(self.config,
                                 self.config_defaults,
                                 table='multicomponent_fitter',
@@ -912,6 +922,8 @@ class HyperfineFitter:
                        if self.mask[i, j] != 0
                        ]
 
+            self.logger.info('Fitting using %d cores' % self.n_cores)
+
             with mp.Pool(self.n_cores) as pool:
                 map_result = list(
                     tqdm(
@@ -920,7 +932,9 @@ class HyperfineFitter:
                                     fit_dict_filename=fit_dict_filename,
                                     save=save,
                                     overwrite=overwrite),
-                            ij_list),
+                            ij_list,
+                            chunksize=chunksize,
+                        ),
                         total=len(ij_list)
                     )
                 )
@@ -967,7 +981,7 @@ class HyperfineFitter:
             error = self.error[:, i, j]
 
             # Limit to a single core to avoid weirdness
-            with threadpool_limits(limits=1, user_api='blas'):
+            with threadpool_limits(limits=1, user_api=None):
                 n_comp, likelihood, sampler = self.delta_bic_looper(data=data,
                                                                     error=error,
                                                                     )
@@ -1175,6 +1189,7 @@ class HyperfineFitter:
                  fit_dict_filename='fit_dict.pkl',
                  p0_fit=None,
                  ):
+        """TODO"""
 
         prop_len = len(self.props)
 
@@ -1324,6 +1339,7 @@ class HyperfineFitter:
                       n_comp=1,
                       progress=False,
                       ):
+        """TODO"""
 
         if self.data_type == 'spectrum':
 
@@ -1400,32 +1416,68 @@ class HyperfineFitter:
 
         return sampler
 
-    def encourage_spatial_coherence(self, sampler_filename='sampler',
-                                    original_fit_dir='original', output_fit_dir='coherence',
-                                    n_comp_filename='n_comp', likelihood_filename='likelihood',
-                                    reverse_direction=False, overwrite=False):
+    def encourage_spatial_coherence(self,
+                                    input_dir='fit',
+                                    output_dir='fit_coherence',
+                                    fit_dict_filename=None,
+                                    n_comp_filename=None,
+                                    likelihood_filename=None,
+                                    reverse_direction=False,
+                                    ):
+        """TODO"""
 
         if self.data_type != 'cube':
             self.logger.warning('Can only do spatial coherence on a cube!')
             sys.exit()
+
+        f_name = inspect.currentframe().f_code.co_name
+        overwrite = check_overwrite(self.config, f_name)
+
+        if fit_dict_filename is None:
+            fit_dict_filename = get_dict_val(self.config,
+                                             self.config_defaults,
+                                             table='multicomponent_fitter',
+                                             key='fit_dict_filename',
+                                             logger=self.logger,
+                                             )
+
+        if n_comp_filename is None:
+            n_comp_filename = get_dict_val(self.config,
+                                           self.config_defaults,
+                                           table='multicomponent_fitter',
+                                           key='n_comp_filename',
+                                           logger=self.logger,
+                                           )
+        if likelihood_filename is None:
+            likelihood_filename = get_dict_val(self.config,
+                                               self.config_defaults,
+                                               table='multicomponent_fitter',
+                                               key='likelihood_filename',
+                                               logger=self.logger,
+                                               )
 
         if reverse_direction:
             step = -1
         else:
             step = 1
 
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
         if overwrite:
 
             # Flush out the directory
-            files_in_dir = glob.glob(output_fit_dir + '/*')
+            files_in_dir = glob.glob(os.path.join(output_dir, '*'))
             for file_in_dir in files_in_dir:
                 os.remove(file_in_dir)
 
-        n_comp = np.load(os.path.join(original_fit_dir, n_comp_filename + '.npy'))
-        likelihood = np.load(os.path.join(original_fit_dir, likelihood_filename + '.npy'))
+        n_comp = np.load(os.path.join(input_dir, '%s.npy' % n_comp_filename))
+        likelihood = np.load(os.path.join(input_dir, '%s.npy' % likelihood_filename))
         total_found = 0
 
-        ij_list = [(i, j) for i in range(self.data.shape[1])[::step] for j in range(self.data.shape[2])[::step]
+        ij_list = [(i, j)
+                   for i in range(self.data.shape[1])[::step]
+                   for j in range(self.data.shape[2])[::step]
                    if self.mask[i, j] != 0]
 
         for ij in tqdm(ij_list):
@@ -1440,8 +1492,8 @@ class HyperfineFitter:
 
             n_comp_cutout = n_comp[i_min: i_max, j_min: j_max]
 
-            input_file = os.path.join(original_fit_dir, sampler_filename + '_%s_%s.pkl' % (i, j))
-            output_file = os.path.join(output_fit_dir, sampler_filename + '_%s_%s.pkl' % (i, j))
+            input_file = os.path.join(input_dir, '%s_%s_%s.pkl' % (fit_dict_filename, i, j))
+            output_file = os.path.join(output_dir, '%s_%s_%s.pkl' % (fit_dict_filename, i, j))
 
             if not os.path.exists(output_file) or overwrite:
 
@@ -1449,17 +1501,8 @@ class HyperfineFitter:
                 ln_m = np.log(len(self.data[:, i, j][~np.isnan(self.data[:, i, j])]))
 
                 # Pull original likelihood for the pixel
-                if n_comp_original > 0:
-                    sampler = load_fit_dict(input_file)
-                    flat_samples = sampler.get_chain(discard=self.n_steps // 2, flat=True)
-                    pars_original = np.nanmedian(flat_samples, axis=0)
-                    like_original = ln_like(pars_original, self.data[:, i, j], self.error[:, i, j], self.vel,
-                                            self.strength_lines, self.v_lines, self.props, n_comp_original,
-                                            self.fit_type)
-                else:
-                    like_original = ln_like(0, self.data[:, i, j], self.error[:, i, j], self.vel,
-                                            self.strength_lines, self.v_lines, self.props, n_comp_original,
-                                            self.fit_type)
+                fit_dict = load_fit_dict(input_file)
+                like_original = fit_dict['likelihood']
 
                 bic_original = ln_m * n_comp_original * len(self.props) - 2 * like_original
 
@@ -1478,23 +1521,43 @@ class HyperfineFitter:
                         if n_comp_new > 0:
 
                             # Check if we already have moved the sampler file
-                            cube_sampler_filename = os.path.join(output_fit_dir,
-                                                                 sampler_filename + '_%s_%s.pkl' % (i_full, j_full))
+                            cutout_fit_dict_filename = os.path.join(output_dir,
+                                                                    '%s_%s_%s.pkl'
+                                                                    % (fit_dict_filename, i_full, j_full))
 
-                            if not os.path.exists(cube_sampler_filename):
-                                cube_sampler_filename = os.path.join(original_fit_dir,
-                                                                     sampler_filename + '_%s_%s.pkl'
-                                                                     % (i_full, j_full))
-                            sampler = load_fit_dict(cube_sampler_filename)
-                            flat_samples = sampler.get_chain(discard=self.n_steps // 2, flat=True)
-                            pars_new = np.nanmedian(flat_samples, axis=0)
-                            like_new = ln_like(pars_new, self.data[:, i, j], self.error[:, i, j], self.vel,
-                                               self.strength_lines, self.v_lines, self.props, n_comp_new,
-                                               self.fit_type)
+                            if not os.path.exists(cutout_fit_dict_filename):
+                                cutout_fit_dict_filename = os.path.join(input_dir,
+                                                                        '%s_%s_%s.pkl'
+                                                                        % (fit_dict_filename, i_full, j_full))
+                            cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
+                            cutout_sampler = cutout_fit_dict['sampler']
+                            flat_samples = cutout_sampler.get_chain(discard=self.n_steps // 2,
+                                                                    flat=True,
+                                                                    )
+                            pars_new = np.nanmedian(flat_samples,
+                                                    axis=0,
+                                                    )
+                            like_new = ln_like(theta=pars_new,
+                                               intensity=self.data[:, i, j],
+                                               intensity_err=self.error[:, i, j],
+                                               vel=self.vel,
+                                               strength_lines=self.strength_lines,
+                                               v_lines=self.v_lines,
+                                               props=self.props,
+                                               n_comp=n_comp_new,
+                                               fit_type=self.fit_type,
+                                               )
                         else:
-                            like_new = ln_like(0, self.data[:, i, j], self.error[:, i, j], self.vel,
-                                               self.strength_lines, self.v_lines, self.props, n_comp_new,
-                                               self.fit_type)
+                            like_new = ln_like(theta=0,
+                                               intensity=self.data[:, i, j],
+                                               intensity_err=self.error[:, i, j],
+                                               vel=self.vel,
+                                               strength_lines=self.strength_lines,
+                                               v_lines=self.v_lines,
+                                               props=self.props,
+                                               n_comp=n_comp_new,
+                                               fit_type=self.fit_type,
+                                               )
                         bic_new = ln_m * n_comp_new * len(self.props) - 2 * like_new
                         delta_bic[i_cutout, j_cutout] = bic_original - bic_new
                         likelihood_cutout[i_cutout, j_cutout] = like_new
@@ -1511,11 +1574,11 @@ class HyperfineFitter:
                     # If we're replacing with a file we've already replaced, pull from the output directory. Else
                     # pull from the input directory.
 
-                    input_file = os.path.join(output_fit_dir,
-                                              sampler_filename + '_%s_%s.pkl' % (idx[0] + i_min, idx[1] + j_min))
+                    input_file = os.path.join(output_dir, '%s_%s_%s.pkl'
+                                              % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
                     if not os.path.exists(input_file):
-                        input_file = os.path.join(original_fit_dir, sampler_filename + '_%s_%s.pkl' %
-                                                  (idx[0] + i_min, idx[1] + j_min))
+                        input_file = os.path.join(input_dir, '%s_%s_%s.pkl'
+                                                  % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
 
                 # Move the right file to the new directory
 
@@ -1523,8 +1586,8 @@ class HyperfineFitter:
 
         self.logger.info('Number replaced: %d' % total_found)
 
-        n_comp_output_filename = os.path.join(output_fit_dir, n_comp_filename + '.npy')
-        likelihood_output_filename = os.path.join(output_fit_dir, likelihood_filename + '.npy')
+        n_comp_output_filename = os.path.join(output_dir, '%s.npy' % n_comp_filename)
+        likelihood_output_filename = os.path.join(output_dir, '%s.npy' % likelihood_filename)
 
         if not os.path.exists(n_comp_output_filename) or overwrite:
             np.save(n_comp_output_filename, n_comp)
@@ -1549,50 +1612,111 @@ class HyperfineFitter:
 
                 if self.fit_type == 'lte':
 
-                    fit_lines[:, draw, i] = hyperfine_structure_lte(*theta_draw, self.strength_lines, self.v_lines,
-                                                                    vel=vel)
+                    fit_lines[:, draw, i] = hyperfine_structure_lte(*theta_draw,
+                                                                    strength_lines=self.strength_lines,
+                                                                    v_lines=self.v_lines,
+                                                                    vel=vel,
+                                                                    )
 
                 elif self.fit_type == 'radex':
 
                     qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
 
-                    fit_lines[:, draw, i] = get_hyperfine_multiple_components(theta_draw, vel, self.v_lines, qn_ul)
+                    fit_lines[:, draw, i] = get_hyperfine_multiple_components(theta_draw,
+                                                                              vel=vel,
+                                                                              v_lines=self.v_lines,
+                                                                              qn_ul=qn_ul,
+                                                                              )
 
         return fit_lines
 
-    def create_fit_cube(self, sampler_filename='sampler', n_comp_filename='n_comp', cube_filename='fit_cube',
-                        chunksize=256):
+    def create_fit_cube(self,
+                        fit_dict_filename=None,
+                        n_comp_filename=None,
+                        cube_filename=None,
+                        ):
         """Create upper/lower errors for spectral fit plots
 
         Returns:
 
         """
 
-        ij_list = [(i, j) for i in range(self.data.shape[1]) for j in range(self.data.shape[2])
-                   if self.mask[i, j] != 0]
+        f_name = inspect.currentframe().f_code.co_name
+        overwrite = check_overwrite(self.config, f_name)
 
-        n_comp = np.load(n_comp_filename + '.npy')
+        if fit_dict_filename is None:
+            fit_dict_filename = get_dict_val(self.config,
+                                             self.config_defaults,
+                                             table='multicomponent_fitter',
+                                             key='fit_dict_filename',
+                                             logger=self.logger,
+                                             )
+        if n_comp_filename is None:
+            n_comp_filename = get_dict_val(self.config,
+                                           self.config_defaults,
+                                           table='multicomponent_fitter',
+                                           key='n_comp_filename',
+                                           logger=self.logger,
+                                           )
 
-        # Setup fit cube
+        if cube_filename is None:
+            cube_filename = get_dict_val(self.config,
+                                         self.config_defaults,
+                                         table='create_fit_cube',
+                                         key='cube_filename',
+                                         logger=self.logger,
+                                         )
 
-        fit_cube = np.zeros([3, *self.data.shape], dtype=np.float32)
+        chunksize = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='create_fit_cube',
+                                 key='chunksize',
+                                 logger=self.logger,
+                                 )
 
-        with mp.Pool(self.n_cores) as pool:
-            map_result = list(tqdm(pool.imap(partial(self.parallel_fit_samples,
-                                                     sampler_filename=sampler_filename,
-                                                     n_comp=n_comp),
-                                             ij_list, chunksize=chunksize), total=len(ij_list)))
+        if not os.path.exists('%s.npy' % cube_filename) or overwrite:
 
-        for idx, ij in enumerate(ij_list):
-            fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
+            ij_list = [(i, j)
+                       for i in range(self.data.shape[1])
+                       for j in range(self.data.shape[2])
+                       if self.mask[i, j] != 0
+                       ]
 
-        np.save(cube_filename + '.npy', fit_cube)
+            n_comp = np.load('%s.npy' % n_comp_filename)
 
-    def parallel_fit_samples(self, ij, sampler_filename=None, n_comp=None):
+            # Setup fit cube
+
+            fit_cube = np.zeros([3, *self.data.shape], dtype=np.float32)
+
+            with mp.Pool(self.n_cores) as pool:
+                map_result = list(
+                    tqdm(
+                        pool.imap(
+                            partial(
+                                self.parallel_fit_samples,
+                                fit_dict_filename=fit_dict_filename,
+                                n_comp=n_comp),
+                            ij_list,
+                            chunksize=chunksize,
+                        ),
+                        total=len(ij_list)
+                    )
+                )
+
+            for idx, ij in enumerate(ij_list):
+                fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
+
+            np.save('%s.npy' % cube_filename, fit_cube)
+
+    def parallel_fit_samples(self,
+                             ij,
+                             fit_dict_filename=None,
+                             n_comp=None,
+                             ):
         """TODO: Docstring"""
 
-        if not sampler_filename or n_comp is None:
-            self.logger.warning('Sampler filename and n_comp must be defined!')
+        if not fit_dict_filename or n_comp is None:
+            self.logger.warning('Fit dict filename and n_comp must be defined!')
             sys.exit()
 
         i = ij[0]
@@ -1600,30 +1724,85 @@ class HyperfineFitter:
 
         n_comp_pix = int(n_comp[i, j])
 
-        cube_sampler_filename = sampler_filename + '_%s_%s.pkl' % (i, j)
+        cube_sampler_filename = '%s_%s_%s.pkl' % (fit_dict_filename, i, j)
 
         if n_comp_pix == 0:
             return np.zeros([3, len(self.vel)])
-        sampler = load_fit_dict(cube_sampler_filename)
-        flat_samples = sampler.get_chain(discard=self.n_steps // 2, flat=True)
+        fit_dict = load_fit_dict(cube_sampler_filename)
+        sampler = fit_dict['sampler']
+        flat_samples = sampler.get_chain(discard=self.n_steps // 2,
+                                         flat=True,
+                                         )
 
-        fit_lines = self.get_fits_from_samples(flat_samples, self.vel, n_draws=100, n_comp=n_comp_pix)
+        fit_lines = self.get_fits_from_samples(flat_samples,
+                                               vel=self.vel,
+                                               n_draws=100,
+                                               n_comp=n_comp_pix,
+                                               )
 
-        fit_percentiles = np.nanpercentile(np.nansum(fit_lines, axis=-1), [50, 16, 84], axis=1)
+        fit_percentiles = np.nanpercentile(np.nansum(fit_lines, axis=-1),
+                                           [50, 16, 84],
+                                           axis=1,
+                                           )
 
         return fit_percentiles
 
-    def make_parameter_maps(self, n_comp_filename='n_comp', sampler_filename='sampler', chunksize=256, n_samples=500,
-                            output_file=None, overwrite=False):
+    def make_parameter_maps(self,
+                            fit_dict_filename=None,
+                            n_comp_filename=None,
+                            maps_filename=None,
+                            ):
+        """TODO"""
 
         if self.data_type != 'cube':
             self.logger.warning('Can only make parameter maps for fitted cubes')
             sys.exit()
 
-        n_comp = np.load(n_comp_filename + '.npy')
+        f_name = inspect.currentframe().f_code.co_name
+        overwrite = check_overwrite(self.config, f_name)
+
+        if fit_dict_filename is None:
+            fit_dict_filename = get_dict_val(self.config,
+                                             self.config_defaults,
+                                             table='multicomponent_fitter',
+                                             key='fit_dict_filename',
+                                             logger=self.logger,
+                                             )
+
+        if n_comp_filename is None:
+            n_comp_filename = get_dict_val(self.config,
+                                           self.config_defaults,
+                                           table='multicomponent_fitter',
+                                           key='n_comp_filename',
+                                           logger=self.logger,
+                                           )
+
+        if maps_filename is None:
+            maps_filename = get_dict_val(self.config,
+                                         self.config_defaults,
+                                         table='make_parameter_maps',
+                                         key='maps_filename',
+                                         logger=self.logger,
+                                         )
+
+        n_samples = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='make_parameter_maps',
+                                 key='n_samples',
+                                 logger=self.logger,
+                                 )
+
+        chunksize = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='make_parameter_maps',
+                                 key='chunksize',
+                                 logger=self.logger,
+                                 )
+
+        n_comp = np.load('%s.npy' % n_comp_filename)
         max_n_comp = int(np.nanmax(n_comp))
 
-        if not os.path.exists(output_file) or overwrite:
+        if not os.path.exists(maps_filename) or overwrite:
 
             # Set up arrays in a dictionary
 
@@ -1635,7 +1814,10 @@ class HyperfineFitter:
 
             for i in range(max_n_comp):
 
-                keys = ['tpeak_%s' % i, 'tpeak_%s_err_up' % i, 'tpeak_%s_err_down' % i]
+                keys = ['tpeak_%s' % i,
+                        'tpeak_%s_err_up' % i,
+                        'tpeak_%s_err_down' % i
+                        ]
                 for key in keys:
                     parameter_maps[key] = np.zeros([self.data.shape[1],
                                                     self.data.shape[2]])
@@ -1643,24 +1825,38 @@ class HyperfineFitter:
 
                 for prop in self.props:
 
-                    keys = [prop + '_%s' % i, prop + '_%s_err_up' % i, prop + '_%s_err_down' % i]
+                    keys = ['%s_%s' % (prop, i),
+                            '%s_%s_err_up' % (prop, i),
+                            '%s_%s_err_down' % (prop, i)
+                            ]
                     for key in keys:
                         parameter_maps[key] = np.zeros([self.data.shape[1],
                                                         self.data.shape[2]])
                         parameter_maps[key][parameter_maps[key] == 0] = np.nan
 
             # Loop over each pixel, pulling out the properties for each component, as well as the peak intensity and
-            # errors for everything. Parallelise this up for speed
+            # errors for everything. Parallelize this up for speed
 
-            ij_list = [[i, j] for i in range(self.data.shape[1]) for j in range(self.data.shape[2])
-                       if self.mask[i, j] != 0]
+            ij_list = [[i, j]
+                       for i in range(self.data.shape[1])
+                       for j in range(self.data.shape[2])
+                       if self.mask[i, j] != 0
+                       ]
 
             with mp.Pool(self.n_cores) as pool:
-                par_dicts = list(tqdm(pool.imap(partial(self.parallel_map_making,
-                                                        n_comp=n_comp,
-                                                        sampler_filename=sampler_filename,
-                                                        n_samples=n_samples),
-                                                ij_list, chunksize=chunksize), total=len(ij_list)))
+                par_dicts = list(
+                    tqdm(
+                        pool.imap(
+                            partial(self.parallel_map_making,
+                                    n_comp=n_comp,
+                                    fit_dict_filename=fit_dict_filename,
+                                    n_samples=n_samples),
+                            ij_list,
+                            chunksize=chunksize,
+                        ),
+                        total=len(ij_list)
+                    )
+                )
 
             # Pull the parameters into the arrays
 
@@ -1672,18 +1868,24 @@ class HyperfineFitter:
 
             # Save out
 
-            if output_file is not None:
-                with open(output_file, 'wb') as f:
+            if maps_filename is not None:
+                with open(maps_filename, 'wb') as f:
                     pickle.dump(parameter_maps, f)
 
         else:
-            with open(output_file, 'rb') as f:
+            with open(maps_filename, 'rb') as f:
                 parameter_maps = pickle.load(f)
 
         self.parameter_maps = parameter_maps
         self.max_n_comp = max_n_comp
 
-    def parallel_map_making(self, ij, n_comp=None, sampler_filename='sampler', n_samples=500):
+    def parallel_map_making(self,
+                            ij,
+                            n_comp=None,
+                            fit_dict_filename='fit_dict',
+                            n_samples=500,
+                            ):
+        """TODO"""
 
         if n_comp is None:
             self.logger.warning('n_comp should be defined!')
@@ -1699,17 +1901,26 @@ class HyperfineFitter:
 
         if n_comps_pix > 0:
 
-            cube_sampler_filename = sampler_filename + '_%s_%s.pkl' % (i, j)
-            sampler = load_fit_dict(cube_sampler_filename)
+            cube_fit_dict_filename = '%s_%s_%s.pkl' % (fit_dict_filename, i, j)
+            fit_dict = load_fit_dict(cube_fit_dict_filename)
+            sampler = fit_dict['sampler']
 
             # Pull out median and errors for each parameter and each component
-            flat_samples = sampler.get_chain(discard=self.n_steps // 2, flat=True)
+            flat_samples = sampler.get_chain(discard=self.n_steps // 2,
+                                             flat=True,
+                                             )
             param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
             param_diffs = np.diff(param_percentiles, axis=0)
 
             # Pull out model for reduced chi-square
-            total_model = multiple_components(param_percentiles[1, :], self.vel, self.strength_lines, self.v_lines,
-                                              self.props, n_comps_pix, self.fit_type)
+            total_model = multiple_components(theta=param_percentiles[1, :],
+                                              vel=self.vel,
+                                              strength_lines=self.strength_lines,
+                                              v_lines=self.v_lines,
+                                              props=self.props,
+                                              n_comp=n_comps_pix,
+                                              fit_type=self.fit_type,
+                                              )
 
             for n_comp_pix in range(n_comps_pix):
 
@@ -1719,7 +1930,11 @@ class HyperfineFitter:
                 for sample in range(n_samples):
                     choice_idx = np.random.randint(0, flat_samples.shape[0])
                     theta = flat_samples[choice_idx, 4 * n_comp_pix: 4 * n_comp_pix + 4]
-                    model = hyperfine_structure_lte(*theta, self.strength_lines, self.v_lines, self.vel)
+                    model = hyperfine_structure_lte(*theta,
+                                                    strength_lines=self.strength_lines,
+                                                    v_lines=self.v_lines,
+                                                    vel=self.vel,
+                                                    )
 
                     tpeak[sample] = np.nanmax(model)
 
@@ -1734,9 +1949,9 @@ class HyperfineFitter:
 
                 for prop_idx, prop in enumerate(self.props):
                     param_idx = n_comp_pix * len(self.props) + prop_idx
-                    par_dict[prop + '_%s' % n_comp_pix] = param_percentiles[1, param_idx]
-                    par_dict[prop + '_%s_err_down' % n_comp_pix] = param_diffs[0, param_idx]
-                    par_dict[prop + '_%s_err_up' % n_comp_pix] = param_diffs[1, param_idx]
+                    par_dict['%s_%s' % (prop, n_comp_pix)] = param_percentiles[1, param_idx]
+                    par_dict['%s_%s_err_down' % (prop, n_comp_pix)] = param_diffs[0, param_idx]
+                    par_dict['%s_%s_err_up' % (prop, n_comp_pix)] = param_diffs[1, param_idx]
 
         else:
             total_model = np.zeros_like(obs)

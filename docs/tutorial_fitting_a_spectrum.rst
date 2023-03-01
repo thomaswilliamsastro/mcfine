@@ -20,4 +20,5 @@ And a config.toml file like:
 
     config = 'config'
 
-If you need inspiration, the default .toml files are given in the code directory (mcfine/toml).
+If you need inspiration, you can print out all parameters and their default parameters
+(see :doc:`advanced topics <advanced_topics>`).

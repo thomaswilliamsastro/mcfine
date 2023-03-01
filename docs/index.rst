@@ -10,6 +10,7 @@
    :caption: Documentation
 
    install
+   advanced_topics
    tutorial_generating_a_spectrum
    tutorial_fitting_a_spectrum
    changelog
