@@ -40,6 +40,7 @@ ALLOWED_FIT_METHODS = [
 
 ALLOWED_LINES = [
     'n2hp10',
+    'co21',
 ]
 
 CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
@@ -53,7 +54,13 @@ mp.set_start_method('fork')
 def round_nearest(x,
                   a,
                   ):
-    """TODO"""
+    """Round x to the nearest a
+
+    Args:
+        x: value to round
+        a: value to round to
+
+    """
 
     return round(round(x / a) * a, -int(np.floor(np.log10(a))))
 
@@ -61,7 +68,15 @@ def round_nearest(x,
 def get_nearest_value(data,
                       value,
                       ):
-    """TODO"""
+    """Get the nearest value in a dataset
+
+    Args:
+        data: array of values to hunt through
+        value: value to find nearest in data to
+
+    Returns:
+        Nearest value
+    """
 
     # Find the nearest below and above
     diff = data - value
@@ -95,7 +110,16 @@ def get_nearest_values(dataset,
                        keys,
                        values,
                        ):
-    """TODO"""
+    """Function to parallelise get_nearest_value
+
+    Args:
+        dataset (dict): Dataset to hunt through
+        keys (list): List of keys to search with
+        values (list): List of values to find in the dataset
+
+    Returns
+        list of the nearest values
+    """
 
     nearest_values_list = [get_nearest_value(dataset[keys[i]].values, values[i])
                            for i in range(len(values))]
@@ -130,7 +154,18 @@ def residual(observed,
              model,
              observed_error=None,
              ):
-    """TODO
+    """Calculate standard residual.
+
+    If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})/{\\rm error}`. Else the sum of
+    :math:`({\\rm obs}-{\\rm model})/{\\rm model}`.
+
+    Args:
+        observed (np.ndarray): Observed values.
+        model (np.ndarray): Model values.
+        observed_error (float or np.ndarray): The error in the observed values. Defaults to None.
+
+    Returns:
+        float: The residual value.
 
     """
 
@@ -149,7 +184,7 @@ def chi_square(observed,
     """Calculate standard chi-square.
 
     If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})^2/{\\rm error}^2`. Else the sum of
-    :math:`({\\rm obs}-{\\rm model})^2/{\\rm model}`.
+    :math:`({\\rm obs}-{\\rm model})^2/{\\rm model}^2`.
 
     Args:
         observed (np.ndarray): Observed values.
@@ -250,11 +285,12 @@ def multiple_components(theta,
     Takes `n_comp` distinct lines, and calculates the total intensity of their various hyperfine lines.
 
     Args:
-        theta (list): [t_ex, tau, vel, vel_width] for each component. Should have a length of 4*`n_comp`.
-        vel: TODO
+        theta: [t_ex, tau, vel, vel_width] for each component. Should have a length of 4*`n_comp`
+        vel: velocity array
         props: TODO
-        n_comp (int): Number of distinct components to calculate intensities for.
-        fit_type: TODO
+        n_comp (int): Number of distinct components to calculate intensities for
+        fit_type (str): Should be one of ALLOWED_FIT_TYPES. Defaults to 'lte'
+        log_tau (bool): Whether to fit tau in log or linear space. Defaults to True (log space)
 
     Returns:
         np.ndarray: The sum of the intensities for all the distinct components.
@@ -370,8 +406,15 @@ def initial_lmfit(params,
 
     theta = np.array([params[key].value for key in params])
 
-    intensity_model = multiple_components(theta, vel, strength_lines, v_lines, props, n_comp=n_comp, fit_type=fit_type,
-                                          log_tau=log_tau)
+    intensity_model = multiple_components(theta=theta,
+                                          vel=vel,
+                                          strength_lines=strength_lines,
+                                          v_lines=v_lines,
+                                          props=props,
+                                          n_comp=n_comp,
+                                          fit_type=fit_type,
+                                          log_tau=log_tau,
+                                          )
     residual = (intensity - intensity_model) / intensity_err
 
     return residual
@@ -516,7 +559,6 @@ class HyperfineFitter:
             * Bounds as parameters to input here.
             * Test the radex fitting routines on cubes.
             * Covariance matrices for the MCMC chains so we can plot errors for each component
-            * Add support for different lines
 
         """
 
@@ -769,17 +811,15 @@ class HyperfineFitter:
         self.max_n_comp = None
 
     def generate_radex_grid(self,
-                            # output_file='radex_output.nc',
+                            output_file=None,
                             # t_kin=None,
                             # t_kin_step=5,
-                            n_mol=None,
-                            n_mol_step=0.2,
-                            n_h2=None,
-                            n_h2_step=0.2,
-                            dv=None,
-                            dv_step=1,
-                            # geom='uni',
-                            # progress=True,
+                            # n_mol=None,
+                            # n_mol_step=0.2,
+                            # n_h2=None,
+                            # n_h2_step=0.2,
+                            # dv=None,
+                            # dv_step=1,
                             ):
         """TODO: This needs to be optimized. Doesn't matter if the grid is kinda massive so long as it works, hey
 
@@ -789,14 +829,85 @@ class HyperfineFitter:
             self.logger.warning('fit_type should be radex')
             sys.exit()
 
-        if t_kin is None:
+        if output_file is None:
+            output_file = get_dict_val(self.config,
+                                       self.config_defaults,
+                                       table='generate_radex_grid',
+                                       key='output_file',
+                                       logger=self.logger,
+                                       )
+
+        t_kin = get_dict_val(self.config,
+                             self.config_defaults,
+                             table='generate_radex_grid',
+                             key='t_kin',
+                             logger=self.logger,
+                             )
+        n_mol = get_dict_val(self.config,
+                             self.config_defaults,
+                             table='generate_radex_grid',
+                             key='n_mol',
+                             logger=self.logger,
+                             )
+        n_h2 = get_dict_val(self.config,
+                            self.config_defaults,
+                            table='generate_radex_grid',
+                            key='n_h2',
+                            logger=self.logger,
+                            )
+        dv = get_dict_val(self.config,
+                          self.config_defaults,
+                          table='generate_radex_grid',
+                          key='dv',
+                          logger=self.logger,
+                          )
+
+        if t_kin == '':
             t_kin = self.bounds[0]
-        if n_mol is None:
+        if n_mol == '':
             n_mol = self.bounds[1]
-        if n_h2 is None:
+        if n_h2 == '':
             n_h2 = self.bounds[2]
-        if dv is None:
+        if dv == '':
             dv = self.bounds[4]
+
+        t_kin_step = get_dict_val(self.config,
+                                  self.config_defaults,
+                                  table='generate_radex_grid',
+                                  key='t_kin_step',
+                                  logger=self.logger,
+                                  )
+        n_mol_step = get_dict_val(self.config,
+                                  self.config_defaults,
+                                  table='generate_radex_grid',
+                                  key='n_mol_step',
+                                  logger=self.logger,
+                                  )
+        n_h2_step = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='generate_radex_grid',
+                                 key='n_h2_step',
+                                 logger=self.logger,
+                                 )
+        dv_step = get_dict_val(self.config,
+                               self.config_defaults,
+                               table='generate_radex_grid',
+                               key='dv_step',
+                               logger=self.logger,
+                               )
+
+        geom = get_dict_val(self.config,
+                            self.config_defaults,
+                            table='generate_radex_grid',
+                            key='geom',
+                            logger=self.logger,
+                            )
+        progress = get_dict_val(self.config,
+                                self.config_defaults,
+                                table='generate_radex_grid',
+                                key='progress',
+                                logger=self.logger,
+                                )
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)

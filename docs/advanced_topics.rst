@@ -21,7 +21,16 @@ and default values.
 Adding another line
 ===================
 
-TODO
+It is possible to add other lines to McFine relatively
+simply. The majority of the info just needs to be put
+into ``line_info.py``. For the LTE case, these are
+``v_lines`` and ``strength_lines``. For a single-peak
+line, this is just 0 and 1. For RT there's
+``transition_lines`` and ``freq_lines``. These should
+descend from the RADEX naming scheme. Once you've added
+those, include your new line in ``ALLOWED_LINES`` in
+``fitting.py``, and edit the config file to use this
+new line.
 
 ============================
 Limiting number of processes
