@@ -2,7 +2,7 @@
 
 [![](https://img.shields.io/pypi/v/mcfine.svg?label=PyPI&style=flat-square)](https://pypi.org/pypi/mcfine/)
 [![](https://img.shields.io/pypi/pyversions/mcfine.svg?label=Python&color=yellow&style=flat-square)](https://pypi.org/pypi/mcfine/)
-[![Actions](https://img.shields.io/github/actions/workflow/status/thomaswilliamsastro/mcfine/test_build.yml?branch=main)](https://github.com/thomaswilliamsastro/mcfine/actions)
+[![Actions](https://img.shields.io/github/actions/workflow/status/thomaswilliamsastro/mcfine/build.yml?branch=main&style=flat-square)](https://github.com/thomaswilliamsastro/mcfine/actions)
 [![Docs](https://readthedocs.org/projects/mcfine/badge/?version=latest&style=flat-square)](https://mcfine.readthedocs.io/en/latest/)
 [![License](https://img.shields.io/badge/license-GNUv3-blue.svg?label=License&style=flat-square)](LICENSE)
 
