@@ -10,8 +10,9 @@
    :caption: Documentation
 
    install
-   tutorial_generating_a_spectrum
-   tutorial_fitting_a_spectrum
+   advanced_topics
+   tutorials/single_spectra_fitting
+   tutorials/cube_fitting
    changelog
    reference_api
 
@@ -21,7 +22,7 @@ Developers
 This package has been developed by:
 
 * Thomas Williams (Oxford)
-* Elizabeth Watkins (ARI/ZAH)
+* Elizabeth Watkins (Manchester)
 
 Citing McFine
 =============
