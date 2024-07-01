@@ -3,7 +3,7 @@ Changelog
 #########
 
 ================
-0.2 (Unreleased)
+0.2 (01/07/2024)
 ================
 
 * Updated GitHub actions

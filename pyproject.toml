@@ -1,7 +1,7 @@
 [project]
 
 name = "mcfine"
-version = "0.1.2"
+version = "0.2"
 description = "Monte-Carlo, Multi-Component ISM Fitting"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,7 +36,7 @@ dependencies = [
     "lmfit",
     "matplotlib",
     "numdifftools",
-    "numpy",
+    "numpy<2.0",
     "scipy",
     "threadpoolctl",
     "tqdm",
