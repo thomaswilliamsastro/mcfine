@@ -16,6 +16,12 @@ A python package for complex, multi-component hyperfine spectra fitting in astro
 $ pip install mcfine
 ```
 
+Or if you want to also use the RT capabilities:
+
+```shell
+$ pip install mcfine[rt]
+```
+
 ## Documentation
 
 Full documentation is available at https://mcfine.readthedocs.io, along with some examples and
