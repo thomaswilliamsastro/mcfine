@@ -3,6 +3,15 @@ Changelog
 #########
 
 ================
+0.3 (Unreleased)
+================
+
+* Increased default sigma bound to 500, to better capture velocity dispersion on larger
+  scales
+* Step plot is now more colourful, and fixed potential overlap between axis and tick labels
+* Added ``loc_image`` to ``plot_fit``, to locate the fit within the image
+
+================
 0.2 (01/07/2024)
 ================
 
