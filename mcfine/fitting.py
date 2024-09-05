@@ -747,7 +747,7 @@ class HyperfineFitter:
                 (T_BACKGROUND, 1e3),
                 (np.log(0.1), np.log(30)),
                 (np.nanmin(self.vel), np.nanmax(self.vel)),
-                (self.dv / 2.355, 10),
+                (self.dv / 2.355, 500),
             ]
 
         elif self.fit_type == 'radex':
@@ -778,7 +778,7 @@ class HyperfineFitter:
                 (T_BACKGROUND, 75),
                 (13, 15), (5, 8),
                 (np.nanmin(self.vel), np.nanmax(self.vel)),
-                (self.dv / 2.355, 10),
+                (self.dv / 2.355, 500),
             ]
 
             radex_datafile = get_dict_val(self.local,

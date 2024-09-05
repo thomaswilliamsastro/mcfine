@@ -2,12 +2,14 @@ import multiprocessing as mp
 import sys
 import warnings
 from functools import partial
+from itertools import cycle
 
 import corner
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import numpy as np
+from matplotlib.gridspec import GridSpec
 from tqdm import tqdm
 
 from .fitting import HyperfineFitter, chi_square
@@ -187,19 +189,51 @@ class HyperfinePlotter(HyperfineFitter):
             for label in self.labels:
                 labels.append(label % i)
 
-        fig, axes = plt.subplots(n_dims, figsize=(8, 6 * n_comp), sharex='all')
-        for i in range(n_dims):
+        fig, axes = plt.subplots(nrows=len(self.labels),
+                                 ncols=n_comp,
+                                 squeeze=False,
+                                 figsize=(6 * n_comp, 2 * len(self.labels)),
+                                 sharex='all',
+                                 )
+        plt.subplots_adjust(hspace=0.1)
 
-            if n_dims == 1:
-                ax = axes
-            else:
-                ax = axes[i]
-            ax.plot(samples[:, :, i], 'k', alpha=0.3)
-            ax.set_xlim(0, len(samples))
-            ax.set_ylabel(labels[i])
-            ax.yaxis.set_label_coords(-0.1, 0.5)
+        axes = axes.T.flatten()
 
-        axes[-1].set_xlabel('Step Number')
+        colour = cycle(iter(plt.cm.rainbow(np.linspace(0, 1, len(self.labels)))))
+
+        ax_i = 0
+
+        for j in range(n_comp):
+
+            for i in range(len(self.labels)):
+
+                c = next(colour)
+
+                # sample_no = i * n_comp + j
+
+                ax = axes[ax_i]
+                ax.plot(samples[:, :, ax_i], c=c, alpha=0.3)
+                ax.set_xlim(0, len(samples))
+
+                # if j == 0:
+                #
+                #     # Get a title, stripping out the string formatting
+                #     title = self.labels[i].strip("(%s)").strip()
+                #
+                #     ax.set_title(title)
+
+                plt.text(0.05, 0.9,
+                         self.labels[i] % j,
+                         ha="left", va="top",
+                         bbox=dict(facecolor='white', edgecolor='black', alpha=1),
+                         transform=ax.transAxes,
+                         )
+
+                # if ax_i >= len(axes) - len(self.labels):
+                if i == len(self.labels) - 1:
+                    ax.set_xlabel('Step Number')
+
+                ax_i += 1
 
         for file_ext in file_exts:
             if file_ext not in ALLOWED_FILE_EXTS:
@@ -348,6 +382,7 @@ class HyperfinePlotter(HyperfineFitter):
             for label in self.labels:
                 labels.append(label % i)
 
+
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             corner.corner(flat_samples, labels=labels, show_titles=True, quantiles=[0.16, 0.5, 0.84])
@@ -366,6 +401,7 @@ class HyperfinePlotter(HyperfineFitter):
                  n_comp_filename=None,
                  plot_name=None,
                  grid=None,
+                 loc_image=None,
                  ):
         """Create fit spectrum plot for either a single spectrum or a (subset of) a cube
 
@@ -379,6 +415,9 @@ class HyperfinePlotter(HyperfineFitter):
             grid (np.ndarray): If fitting a cube, can pass a ndarray of 1 (plot) and 0
                 (do not plot) to avoid making loads of plots. Defaults to None, which
                 will then use the fitting mask and plot everything
+            loc_image (np.ndarray): If fitting a cube, we can pass an image to here
+                so the fit will also have a subplot showing the location of the
+                pixel in question. Defaults to None, which will not plot this
         """
 
         if fit_dict_filename is None:
@@ -492,6 +531,7 @@ class HyperfinePlotter(HyperfineFitter):
                             partial(self.parallel_plot_fit,
                                     fit_dict_filename=fit_dict_filename,
                                     plot_name=plot_name,
+                                    loc_image=loc_image,
                                     n_comp=n_comp,
                                     show_individual_components=show_individual_components,
                                     show_hyperfine_components=show_hyperfine_components,
@@ -510,6 +550,7 @@ class HyperfinePlotter(HyperfineFitter):
     def parallel_plot_fit(self,
                           ij,
                           fit_dict_filename=None,
+                          loc_image=None,
                           n_comp=None,
                           plot_name='fit',
                           show_individual_components=True,
@@ -545,9 +586,21 @@ class HyperfinePlotter(HyperfineFitter):
         else:
             flat_samples = None
         cube_plot_name = plot_name + '_%s_%s' % (i, j)
+
+        # Figure out the optimum figure size
+        if loc_image is not None:
+            ratio = loc_image.shape[0] / loc_image.shape[1]
+            figsize = (3 * 5, 5 * ratio)
+
+        else:
+            figsize = figsize
+
         self.fit(flat_samples=flat_samples,
                  data=data,
                  error=error,
+                 loc_image=loc_image,
+                 i=i,
+                 j=j,
                  n_comp=n_comp_pix,
                  plot_name=cube_plot_name,
                  show_individual_components=show_individual_components,
@@ -563,6 +616,9 @@ class HyperfinePlotter(HyperfineFitter):
             flat_samples,
             data,
             error,
+            loc_image=None,
+            i=None,
+            j=None,
             n_comp=1,
             plot_name='fit',
             show_individual_components=True,
@@ -610,8 +666,14 @@ class HyperfinePlotter(HyperfineFitter):
         deg_freedom = len(data[~np.isnan(data)]) - (n_comp * len(self.props))
         chisq_red = chisq / deg_freedom
 
-        plt.figure(figsize=figsize)
-        ax = plt.subplot(111)
+        fig = plt.figure(figsize=figsize)
+
+        if loc_image is not None:
+            gs = GridSpec(1, 3, figure=fig)
+            ax = fig.add_subplot(gs[0, :-1])
+        else:
+            gs = GridSpec(1, 1, figure=fig)
+            ax = fig.add_subplot(gs[0, 0])
 
         plt.step(self.vel, data, where='mid', c='k')
 
@@ -625,9 +687,10 @@ class HyperfinePlotter(HyperfineFitter):
 
             if show_individual_components:
                 plt.plot(vel_plot_mcmc, fit_percentiles_components[0, :, :], c='k')
-                for i in range(fit_percentiles_components.shape[-1]):
+                for i_fit_percentiles in range(fit_percentiles_components.shape[-1]):
                     plt.fill_between(vel_plot_mcmc,
-                                     fit_percentiles_components[1, :, i], fit_percentiles_components[2, :, i],
+                                     fit_percentiles_components[1, :, i_fit_percentiles],
+                                     fit_percentiles_components[2, :, i_fit_percentiles],
                                      color='k', alpha=0.75)
 
         plt.xlim([vel_min, vel_max])
@@ -648,13 +711,44 @@ class HyperfinePlotter(HyperfineFitter):
         plt.xlabel(x_label)
         plt.ylabel(y_label)
 
-        plt.tight_layout()
+        if loc_image is not None:
+            ax = fig.add_subplot(gs[0, -1])
+
+            vmin, vmax = np.nanpercentile(loc_image, [1, 99])
+
+            ax.imshow(loc_image,
+                      origin="lower",
+                      vmin=vmin,
+                      vmax=vmax,
+                      cmap="inferno",
+                      )
+
+            # Put a cross on the image to show where the pixel is
+            if i is not None and j is not None:
+                print(i, j)
+                plt.scatter(j, i,
+                            c='lime',
+                            marker='x',
+                            )
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax.yaxis.tick_right()
+            ax.yaxis.set_label_position("right")
+
+            plt.subplots_adjust(hspace=0, wspace=0)
+
+        else:
+            plt.tight_layout()
 
         for file_ext in file_exts:
             if file_ext not in ALLOWED_FILE_EXTS:
                 self.logger.warning('file_ext should be one of %s' % ALLOWED_FILE_EXTS)
                 sys.exit()
 
-            plt.savefig('%s.%s' % (plot_name, file_ext), bbox_inches='tight')
+            plt.savefig('%s.%s' % (plot_name, file_ext),
+                        bbox_inches='tight',
+                        )
 
         plt.close()
