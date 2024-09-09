@@ -6,6 +6,8 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Added pure Gaussian option, which just models purely Gaussian line profiles with Tpeak/v/sigma
+* Fix bug in map making if ``fit_type`` is not ``lte``
 * Increased default sigma bound to 500, to better capture velocity dispersion on larger
   scales
 * Step plot is now more colourful, and fixed potential overlap between axis and tick labels

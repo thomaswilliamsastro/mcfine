@@ -31,6 +31,7 @@ progress = true
 [initial_guess]
 
 lte = [15, 0, 0, 0.5]
+pure_gauss = [10, 0, 0.5]
 radex = [20, 14, 6, 0, 0.5]
 
 [lmfit]

@@ -30,6 +30,7 @@ T_BACKGROUND = 2.73
 
 ALLOWED_FIT_TYPES = [
     'lte',
+    'pure_gauss',
     'radex',
 ]
 
@@ -251,6 +252,47 @@ def hyperfine_structure_lte(t_ex,
         return intensity_components, intensity_total
 
 
+def hyperfine_structure_pure_gauss(t,
+                                   v_centre,
+                                   line_width,
+                                   strength_lines,
+                                   v_lines,
+                                   vel,
+                                   return_hyperfine_components=False,
+                                   ):
+    """Create hyperfine intensity profile for a pure Gaussian profile.
+
+    Takes line strengths and relative velocity centres, along with peak temperature to
+    produce a hyperfine intensity profile.
+
+    Args:
+        t (float): Line temperature (K).
+        v_centre (float): Central velocity of the strongest component (km/s).
+        strength_lines (np.ndarray): Array of relative line strengths
+        v_lines (np.ndarray): Array of relative velocity shifts for the lines (km/s)
+        vel (np.ndarray): Velocity array (km/s)
+        line_width (float): Width of components (assumed to be the same for each hyperfine component; km/s).
+        return_hyperfine_components (bool): Return the intensity for each hyperfine component. Defaults to False.
+
+    Returns:
+        Intensity for each individual hyperfine component (if `return_hyperfine_components` is True), and the total
+            intensity for all components
+    """
+
+    intensity_components = gaussian(vel[:, np.newaxis],
+                                    t * strength_lines,
+                                    v_lines + v_centre,
+                                    line_width
+                                    )
+
+    intensity_total = np.nansum(intensity_components, axis=-1)
+
+    if not return_hyperfine_components:
+        return intensity_total
+    else:
+        return intensity_components, intensity_total
+
+
 def hyperfine_structure_radex(t_ex,
                               tau,
                               v_centre,
@@ -326,6 +368,15 @@ def multiple_components(theta,
 
         intensity_model = np.array([hyperfine_structure_lte(*theta[prop_len * i: prop_len * i + prop_len],
                                                             strength_lines, v_lines, vel, log_tau=log_tau)
+                                    for i in range(n_comp)])
+
+    elif fit_type == 'pure_gauss':
+
+        intensity_model = np.array([hyperfine_structure_pure_gauss(*theta[prop_len * i: prop_len * i + prop_len],
+                                                                   strength_lines,
+                                                                   v_lines,
+                                                                   vel
+                                                                   )
                                     for i in range(n_comp)])
 
     elif fit_type == 'radex':
@@ -750,6 +801,20 @@ class HyperfineFitter:
                 (self.dv / 2.355, 500),
             ]
 
+        elif self.fit_type == 'pure_gauss':
+
+            self.strength_lines = np.array(
+                [strength_lines[line_name] for line_name in strength_lines.keys() if self.line in line_name]
+            )
+            self.v_lines = np.array(
+                [v_lines[line_name] for line_name in v_lines.keys() if self.line in line_name]
+            )
+            self.bounds = [
+                (0, 1e3),
+                (np.nanmin(self.vel), np.nanmax(self.vel)),
+                (self.dv / 2.355, 500),
+            ]
+
         elif self.fit_type == 'radex':
 
             rest_freq = get_dict_val(self.config,
@@ -851,6 +916,18 @@ class HyperfineFitter:
             self.labels = [
                 r'$T_\mathrm{ex}$ (%s)',
                 r'$\log(\tau)$ (%s)',
+                r'$v$ (%s)',
+                r'$\sigma$ (%s)',
+            ]
+
+        elif self.fit_type == 'pure_gauss':
+            self.props = [
+                't',
+                'v',
+                'sigma',
+            ]
+            self.labels = [
+                r'$T$ (%s)',
                 r'$v$ (%s)',
                 r'$\sigma$ (%s)',
             ]
@@ -1306,6 +1383,16 @@ class HyperfineFitter:
                          for i in range(n_comp)]
                     )
 
+                elif self.fit_type == 'pure_gauss':
+                    line_intensities = np.array(
+                        [hyperfine_structure_pure_gauss(*parameter_median[prop_len * i: prop_len * i + prop_len],
+                                                        strength_lines=self.strength_lines,
+                                                        v_lines=self.v_lines,
+                                                        vel=self.vel,
+                                                        )
+                         for i in range(n_comp)]
+                    )
+
                 elif self.fit_type == 'radex':
                     line_intensities = np.array(
                         [hyperfine_structure_radex(*parameter_median[prop_len * i: prop_len * i + prop_len],
@@ -1489,6 +1576,8 @@ class HyperfineFitter:
 
             if self.fit_type == 'lte':
                 positive_idx = [0, 3]
+            elif self.fit_type == 'pure_gauss':
+                positive_idx = [0, 2]
             elif self.fit_type == 'radex':
                 positive_idx = [0, 1, 4]
             else:
@@ -1875,6 +1964,14 @@ class HyperfineFitter:
                                                                     vel=vel,
                                                                     )
 
+                elif self.fit_type == 'pure_gauss':
+
+                    fit_lines[:, draw, i] = hyperfine_structure_pure_gauss(*theta_draw,
+                                                                           strength_lines=self.strength_lines,
+                                                                           v_lines=self.v_lines,
+                                                                           vel=vel,
+                                                                           )
+
                 elif self.fit_type == 'radex':
 
                     qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
@@ -2198,14 +2295,38 @@ class HyperfineFitter:
                 # Pull out peak intensities and errors for each component
 
                 tpeak = np.zeros(n_samples)
+                idx_offset = len(self.props)
                 for sample in range(n_samples):
                     choice_idx = np.random.randint(0, flat_samples.shape[0])
-                    theta = flat_samples[choice_idx, 4 * n_comp_pix: 4 * n_comp_pix + 4]
-                    model = hyperfine_structure_lte(*theta,
-                                                    strength_lines=self.strength_lines,
-                                                    v_lines=self.v_lines,
-                                                    vel=self.vel,
-                                                    )
+                    theta = flat_samples[
+                            choice_idx,
+                            idx_offset * n_comp_pix: idx_offset * n_comp_pix + idx_offset
+                            ]
+
+                    if self.fit_type == "lte":
+                        model = hyperfine_structure_lte(*theta,
+                                                        strength_lines=self.strength_lines,
+                                                        v_lines=self.v_lines,
+                                                        vel=self.vel,
+                                                        )
+
+                    elif self.fit_type == 'pure_gauss':
+                        model = hyperfine_structure_pure_gauss(*theta,
+                                                               strength_lines=self.strength_lines,
+                                                               v_lines=self.v_lines,
+                                                               vel=self.vel,
+                                                               )
+
+                    elif self.fit_type == 'radex':
+
+                        model = hyperfine_structure_radex(*theta,
+                                                          v_lines=self.v_lines,
+                                                          vel=self.vel,
+                                                          )
+
+                    else:
+                        self.logger.warning('Fit type %s not understood!' % self.fit_type)
+                        sys.exit()
 
                     tpeak[sample] = np.nanmax(model)
 

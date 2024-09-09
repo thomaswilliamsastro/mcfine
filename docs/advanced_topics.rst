@@ -2,6 +2,19 @@
 Advanced Topics
 ###############
 
+===================
+Different fit types
+===================
+
+We expect that most users will use LTE modelling, there also
+exists options for RADEX and pure Gaussian fitting. These
+are accessed by the ``fit_type`` parameter:
+
+.. code-block:: toml
+
+  [fitting_params]
+  fit_type = 'lte'  # Can be 'lte', 'radex', or 'pure_gauss'
+
 =======================
 Configurable parameters
 =======================
