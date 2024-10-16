@@ -16,7 +16,14 @@ except ModuleNotFoundError:
 
 import astropy.units as u
 import emcee
-import ndradexhyperfine as ndradex
+
+NDRADEX_IMPORTED = False
+try:
+    import ndradexhyperfine as ndradex
+    NDRADEX_IMPORTED = True
+except ModuleNotFoundError:
+    pass
+
 import numpy as np
 from lmfit import minimize, Parameters
 from scipy.interpolate import RegularGridInterpolator
@@ -685,6 +692,10 @@ class HyperfineFitter:
                             )
         self.logger = logging.getLogger(__name__)
 
+        # Let us know if ndradex has been imported
+        if not NDRADEX_IMPORTED:
+            self.logger.warning("ndradexhyperfine not imported. RT capabilities disabled")
+
         if data is None:
             self.logger.warning('data should be provided!')
             sys.exit()
@@ -736,6 +747,9 @@ class HyperfineFitter:
             sys.exit()
 
         self.fit_type = fit_type
+
+        if self.fit_type == "radex" and not NDRADEX_IMPORTED:
+            raise ValueError("Cannot use mode radex if ndradexhyperfine is not installed!")
 
         fit_method = get_dict_val(self.config,
                                   self.config_defaults,

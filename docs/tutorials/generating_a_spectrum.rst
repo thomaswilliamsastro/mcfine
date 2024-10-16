@@ -8,6 +8,7 @@ This is how you can generate an N2H+ spectrum (which here is centred around a ve
 .. code-block:: python
 
     import matplotlib.pyplot as plt
+    from mcfine.fitting import multiple_components
     from mcfine.line_info import v_lines, strength_lines
     import numpy as np
 
@@ -55,7 +56,13 @@ This is how you can generate an N2H+ spectrum (which here is centred around a ve
 
     # Generate noise-free spectrum
     props = ['tex', 'tau', 'v', 'sigma']
-    spectrum_noise_free = multiple_components(theta, vel, strength_lines, v_lines, props, n_comp)
+    spectrum_noise_free = multiple_components(theta=theta,
+                                              vel=vel,
+                                              strength_lines=strength_lines_n2hp,
+                                              v_lines=v_lines_n2hp,
+                                              props=props,
+                                              n_comp=n_comp,
+                                              )
 
     # Create an error spectrum with 0.1K random noise and 5% calibration error
     noise_level = 0.1
