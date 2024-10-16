@@ -11,12 +11,15 @@ McFine requires:
 * astropy
 * emcee
 * lmfit
-* ndradexhyperfine
 * numdifftools
 * numpy
 * scipy
 * threadpoolctl
 * tqdm
+
+The RT mode requires:
+
+* ndradexhyperfine
 
 The plotting requires:
 
