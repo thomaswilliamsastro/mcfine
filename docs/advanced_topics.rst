@@ -28,7 +28,26 @@ in-built convenience function:
     print_config_params()
 
 This will list all the parameters, as well as their type
-and default values.
+and default values. You can also see the default values
+McFine will use in ``mcfine/toml/`` in the GitHub repository,
+which may also be useful for those who aren't too familiar
+with toml.
+
+==================
+Exploring samplers
+==================
+
+Although we expose convenience functions for exploring
+the fits (see :doc:`here <tutorials/exploring_cube_fits>`), you
+can also directly access the `emcee` sampler object:
+
+.. code-block:: python
+
+    with open(file_name, 'rb') as f:
+        fit_dict = pickle.load(f)
+    sampler = fit_dict["sampler"]
+
+from there, you can mess around with this as you'd like.
 
 ===================
 Adding another line
