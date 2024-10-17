@@ -40,6 +40,8 @@ Taking the ``data``, ``vel``, and ``error_spectrum`` from the
 
     from mcfine.fitting import HyperfineFitter
 
+    fit_dir = "fit"
+
     fit_dict_filename = os.path.join(fit_dir, 'fit_dict')
 
     if not os.path.exists(fit_dict_filename + '.pkl') or overwrite_fits:
@@ -52,6 +54,10 @@ Taking the ``data``, ``vel``, and ``error_spectrum`` from the
         )
 
         hf.multicomponent_fitter(fit_dict_filename=fit_dict_filename)
+
+Note that for the initial guess step, the algorithm can be quite slow and will not print out
+and progress. Rest assured, things are still running! This is the bottleneck in the code and
+is the reason why we **strongly** suggest running on a compute cluster.
 
 If you need inspiration, you can print out all parameters and their default parameters
 (see :doc:`advanced topics <../advanced_topics>`).
