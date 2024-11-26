@@ -36,7 +36,7 @@ except you can also provide a grid to cut down the number of plots created. For 
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
 
-    hf_plotter.plot_step(plot_name=os.path.join(fit_dir, plot_dir, f'{target}_step',
+    hf_plotter.plot_step(plot_name=os.path.join(fit_dir, plot_dir, f'{target}_step'),
                          fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                          n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                          grid=grid)
