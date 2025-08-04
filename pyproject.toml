@@ -4,7 +4,7 @@ name = "mcfine"
 version = "0.2"
 description = "Monte-Carlo, Multi-Component ISM Fitting"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {file = "LICENSE"}
 
 authors = [
@@ -24,28 +24,27 @@ classifiers = [
   # License
   "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
 
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
 ]
 
 dependencies = [
-    "astropy",
-    "corner",
-    "emcee",
-    "lmfit",
-    "matplotlib",
-    "numdifftools",
-    "numpy<2.0",
-    "scipy",
-    "threadpoolctl",
-    "tqdm",
+    "astropy == 7.1.0",
+    "corner == 2.2.3",
+    "emcee == 3.1.6",
+    "lmfit == 1.3.4",
+    "matplotlib == 3.10.5",
+    "numdifftools == 0.9.41",
+    "numpy == 2.3.2",
+    "scipy == 1.16.1",
+    "threadpoolctl == 3.6.0",
+    "tqdm == 4.67.1",
 ]
 
 # Because readthedocs fails on ndradexhyperfine, set up optionals here
 [project.optional-dependencies]
 rt = [
-    "ndradexhyperfine"
+    "ndradex == 0.3.1",
 ]
 
 docs = [

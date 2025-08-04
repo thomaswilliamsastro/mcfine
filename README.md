@@ -19,15 +19,17 @@ $ pip install mcfine
 Or if you want to also use the RT capabilities:
 
 ```shell
-$ pip install mcfine[rt]
+$ pip install git+https://github.com/astropenguin/ndradex.git
 ```
+
+Please note that for now RT capabilities are untested, and will be updated in future versions
 
 ## Documentation
 
 Full documentation is available at https://mcfine.readthedocs.io, along with some examples and
 demonstrations of features.
 
-A more philosophical introduction to McFine is presented in Williams & Watkins (in prep.), along with some tests of how
+A more philosophical introduction to McFine is presented in Williams & Watkins (2024), along with some tests of how
 well the code performs in synthetic tests and on real life space data.
 
 ## Problems?

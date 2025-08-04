@@ -27,7 +27,7 @@ This package has been developed by:
 Citing McFine
 =============
 
-If you use McFine in your work, please drop us a citation (Williams & Watkins, in prep.), and provide a footnote to the
+If you use McFine in your work, please drop us a citation (Williams & Watkins, 2024), and provide a footnote to the
 package repository (https://github.com/thomaswilliamsastro/mcfine).
 
 Indices and tables
