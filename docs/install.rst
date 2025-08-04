@@ -19,7 +19,7 @@ McFine requires:
 
 The RT mode requires:
 
-* ndradexhyperfine
+* ndradex (install from GitHub, git+https://github.com/astropenguin/ndradex.git)
 
 The plotting requires:
 

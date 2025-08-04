@@ -6,6 +6,8 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Add dependabot.yml
+* Use exact version pins in pyproject.toml
 * Update tutorials since some functions have changed
 * Explicitly make ndradexhyperfine optional
 * Added pure Gaussian option, which just models purely Gaussian line profiles with Tpeak/v/sigma
