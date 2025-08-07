@@ -37,6 +37,7 @@ dependencies = [
     "numdifftools == 0.9.41",
     "numpy == 2.3.2",
     "scipy == 1.16.1",
+    "specutils == 2.1.0",
     "threadpoolctl == 3.6.0",
     "tqdm == 4.67.1",
 ]
