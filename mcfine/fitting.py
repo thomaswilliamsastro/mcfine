@@ -9,6 +9,10 @@ import sys
 import warnings
 from functools import partial
 
+from specutils import Spectrum
+from specutils.fitting import find_lines_derivative
+from astropy.stats import akaike_info_criterion, bayesian_info_criterion
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -20,6 +24,7 @@ import emcee
 NDRADEX_IMPORTED = False
 try:
     import ndradexhyperfine as ndradex
+
     NDRADEX_IMPORTED = True
 except ModuleNotFoundError:
     pass
@@ -34,6 +39,11 @@ from .line_info import transition_lines, freq_lines, strength_lines, v_lines
 from .utils import get_dict_val, check_overwrite, save_fit_dict, load_fit_dict
 
 T_BACKGROUND = 2.73
+
+ALLOWED_LMFIT_METHODS = [
+    "default",
+    "iterative",
+]
 
 ALLOWED_FIT_TYPES = [
     'lte',
@@ -513,7 +523,8 @@ def initial_lmfit(params,
                                           fit_type=fit_type,
                                           log_tau=log_tau,
                                           )
-    residual = (intensity - intensity_model) / intensity_err
+    diff = intensity - intensity_model
+    residual = diff / intensity_err
 
     return residual
 
@@ -748,6 +759,19 @@ class HyperfineFitter:
 
         self.fit_type = fit_type
 
+        lmfit_method = get_dict_val(self.config,
+                                    self.config_defaults,
+                                    table="fitting_params",
+                                    key="lmfit_method",
+                                    logger=self.logger,
+                                    )
+
+        if lmfit_method not in ALLOWED_LMFIT_METHODS:
+            self.logger.warning(f'lmfit_method should be one of {ALLOWED_LMFIT_METHODS}!')
+            sys.exit()
+
+        self.lmfit_method = lmfit_method
+
         if self.fit_type == "radex" and not NDRADEX_IMPORTED:
             raise ValueError("Cannot use mode radex if ndradexhyperfine is not installed!")
 
@@ -889,6 +913,15 @@ class HyperfineFitter:
                                         )
 
         self.delta_bic_cutoff = delta_bic_cutoff
+
+        delta_aic_cutoff = get_dict_val(self.config,
+                                        self.config_defaults,
+                                        table='mcmc',
+                                        key='delta_aic_cutoff',
+                                        logger=self.logger,
+                                        )
+
+        self.delta_aic_cutoff = delta_aic_cutoff
 
         n_steps = get_dict_val(self.config,
                                self.config_defaults,
@@ -1313,6 +1346,7 @@ class HyperfineFitter:
         # We start with a zero component model, i.e. a flat line
 
         delta_bic = np.inf
+        delta_aic = np.inf
         sampler_old = None
         likelihood_old = None
         sampler = None
@@ -1330,10 +1364,12 @@ class HyperfineFitter:
                              fit_type=self.fit_type,
                              )
         bic = - 2 * likelihood
+        aic = - 2 * likelihood
 
-        while delta_bic > self.delta_bic_cutoff:
+        while delta_bic > self.delta_bic_cutoff or delta_aic > self.delta_aic_cutoff:
             # Store the previous BIC and sampler, since we need them later
             bic_old = bic
+            aic_old = aic
             sampler_old = sampler
             likelihood_old = likelihood
 
@@ -1367,8 +1403,13 @@ class HyperfineFitter:
                                  n_comp=n_comp,
                                  fit_type=self.fit_type,
                                  )
+
+            # Calculate BIC and AIC
             bic = k * ln_m - 2 * likelihood
             delta_bic = bic_old - bic
+
+            aic = 2 * k - 2 * likelihood
+            delta_aic = aic_old - aic
 
         sampler = sampler_old
         likelihood = likelihood_old
@@ -1423,6 +1464,7 @@ class HyperfineFitter:
                 component_order = np.argsort(integrated_intensities)
 
                 bic_old = bic
+                aic_old = aic
                 sampler_old = sampler
                 likelihood_old = likelihood
 
@@ -1471,10 +1513,13 @@ class HyperfineFitter:
                                          fit_type=self.fit_type,
                                          )
                     bic = k * ln_m - 2 * likelihood
+                    aic = 2 * k - 2 * likelihood
+
                 delta_bic = bic_old - bic
+                delta_aic = aic_old - aic
 
                 # If removing and refitting doesn't significantly improve things, then just jump out of here
-                if delta_bic < self.delta_bic_cutoff:
+                if delta_bic < self.delta_bic_cutoff and delta_aic < self.delta_aic_cutoff:
                     break
 
             sampler = sampler_old
@@ -1517,28 +1562,7 @@ class HyperfineFitter:
 
                 vel_idx = np.where(np.array(self.props) == 'v')[0][0]
 
-                p0 = np.array(self.p0 * n_comp)
-
-                # Move the velocities a little to encourage parameter space hunting
-
-                for i in range(n_comp):
-                    p0[prop_len * i + vel_idx] += i
-
-                # Use lmfit to get an initial fit
-
-                params = Parameters()
-                p0_idx = 0
-                for i in range(n_comp):
-                    for j in range(prop_len):
-                        params.add('%s_%d' % (self.props[j], i),
-                                   value=p0[p0_idx],
-                                   min=bounds[j][0],
-                                   max=bounds[j][1],
-                                   )
-                        p0_idx += 1
-
                 # Pull in any relevant kwargs
-
                 kwargs = {}
 
                 for config_dict in [self.config_defaults, self.config]:
@@ -1546,26 +1570,147 @@ class HyperfineFitter:
                         for key in config_dict['lmfit']:
                             kwargs[key] = config_dict['lmfit'][key]
 
-                # Filter out any NaNs
+                # We have a default here set to add minimizer_kwargs,
+                # which will crash for minimizers that don't support this
+                minimizers_with_minimizer_kwargs = [
+                    "basinhopping",
+                    "dual_annealing",
+                    "shgo",
+                ]
+
+                if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
+                    kwargs.pop("minimizer_kwargs", None)
+
+                # Find any NaNs
                 good_idx = np.where(~np.isnan(data))
 
-                lmfit_result = minimize(
-                    fcn=initial_lmfit,
-                    params=params,
-                    args=(data[good_idx],
-                          error[good_idx],
-                          self.vel[good_idx],
-                          self.strength_lines,
-                          self.v_lines,
-                          self.props,
-                          n_comp,
-                          self.fit_type,
-                          True,
-                          ),
-                    **kwargs,
-                )
+                # And the velocity resolution
+                dv = np.abs(np.nanmedian(np.diff(self.vel)))
 
-                p0_fit = np.array([lmfit_result.params[key].value for key in lmfit_result.params])
+                p0 = np.array(self.p0 * n_comp)
+
+                # Do the default method, where we brute force through
+                # the least squares
+                if self.lmfit_method == "default":
+
+                    # Move the velocities a channel to encourage parameter space hunting
+
+                    for i in range(n_comp):
+                        p0[prop_len * i + vel_idx] += i * dv
+
+                    params = Parameters()
+                    p0_idx = 0
+                    for i in range(n_comp):
+                        for j in range(prop_len):
+                            params.add('%s_%d' % (self.props[j], i),
+                                       value=p0[p0_idx],
+                                       min=bounds[j][0],
+                                       max=bounds[j][1],
+                                       )
+                            p0_idx += 1
+
+                    # Use lmfit to get an initial fit
+                    lmfit_result = minimize(
+                        fcn=initial_lmfit,
+                        params=params,
+                        args=(data[good_idx],
+                              error[good_idx],
+                              self.vel[good_idx],
+                              self.strength_lines,
+                              self.v_lines,
+                              self.props,
+                              n_comp,
+                              self.fit_type,
+                              True,
+                              ),
+                        **kwargs,
+                    )
+
+                    p0_fit = np.array([lmfit_result.params[key].value for key in lmfit_result.params])
+
+                # Get an initial guess for the velocities via an iterative method
+                elif self.lmfit_method == "iterative":
+
+                    # Start with flat line model
+                    it_model = np.zeros(len(data))
+
+                    lmfit_result = None
+                    params = Parameters()
+                    p0_fit = np.array([])
+
+                    for comp in range(n_comp):
+
+                        it_data = data - it_model
+
+                        # Find lines. We impose no flux cut here
+                        spec = Spectrum(flux=it_data * u.K, spectral_axis=self.vel * u.km / u.s)
+                        found_lines = find_lines_derivative(spec)
+
+                        # Only take emission lines
+                        found_lines = found_lines[found_lines["line_type"] == "emission"]
+
+                        # Now take these lines and order by flux
+                        found_line_fluxes = np.array([float(it_data[x])
+                                                      for x in found_lines["line_center_index"]]
+                                                     )
+                        found_line_vels = found_lines["line_center"].value
+
+                        # Sort from brightest to faintest, pick the brightest component
+                        idxs = np.argsort(found_line_fluxes)[::-1]
+                        found_line_vel = found_line_vels[idxs][0]
+
+                        # Having found the velocity, we then fit all components to the data
+                        p0 = np.array([float(x) for x in self.p0])
+                        p0[vel_idx] = copy.deepcopy(found_line_vel)
+
+                        # Update the parameters with any new best guesses
+                        if lmfit_result is not None:
+                            for key in lmfit_result.params:
+                                params[key].set(value=lmfit_result.params[key].value)
+
+                        for j in range(prop_len):
+
+                            b_min = copy.deepcopy(bounds[j][0])
+                            b_max = copy.deepcopy(bounds[j][1])
+
+                            params.add(f"{self.props[j]}_{comp}",
+                                       value=p0[j],
+                                       min=b_min,
+                                       max=b_max,
+                                       )
+
+                        # Get a fit to the actual data
+                        lmfit_result = minimize(
+                            fcn=initial_lmfit,
+                            params=params,
+                            args=(data[good_idx],
+                                  error[good_idx],
+                                  self.vel[good_idx],
+                                  self.strength_lines,
+                                  self.v_lines,
+                                  self.props,
+                                  comp + 1,
+                                  self.fit_type,
+                                  True,
+                                  ),
+                            **kwargs,
+                        )
+
+                        p0_fit = np.array([lmfit_result.params[key].value for key in lmfit_result.params])
+
+                        it_model = multiple_components(p0_fit,
+                                                       vel=self.vel,
+                                                       strength_lines=self.strength_lines,
+                                                       v_lines=self.v_lines,
+                                                       props=self.props,
+                                                       n_comp=comp + 1,
+                                                       fit_type=self.fit_type,
+                                                       log_tau=True,
+                                                       )
+
+                else:
+
+                    raise ValueError(f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}")
 
                 # Sort p0 so it has monotonically increasing velocities
                 v0_values = np.array(
@@ -1857,8 +2002,10 @@ class HyperfineFitter:
                 like_original = fit_dict['likelihood']
 
                 bic_original = ln_m * n_comp_original * len(self.props) - 2 * like_original
+                aic_original = 2 * n_comp_original * len(self.props) - 2 * like_original
 
                 delta_bic = np.zeros_like(n_comp_cutout)
+                delta_aic = np.zeros_like(delta_bic)
                 likelihood_cutout = np.zeros_like(delta_bic)
 
                 for i_cutout, i_full in enumerate(range(i_min, i_max)):
@@ -1911,14 +2058,20 @@ class HyperfineFitter:
                                                fit_type=self.fit_type,
                                                )
                         bic_new = ln_m * n_comp_new * len(self.props) - 2 * like_new
+                        aic_new = 2 * n_comp_new * len(self.props) - 2 * like_new
                         delta_bic[i_cutout, j_cutout] = bic_original - bic_new
+                        delta_aic[i_cutout, j_cutout] = aic_original - aic_new
                         likelihood_cutout[i_cutout, j_cutout] = like_new
 
-                # Find the maximum change in BIC between pixels. Set ones where we don't have a meaningful value to
-                # something small
+                # Set ones where we don't have a meaningful value to something small
                 delta_bic[delta_bic == 0] = -1000
+                delta_aic[delta_aic == 0] = -1000
+
+                # Find the position of maximum change in BIC between pixels.
                 idx = np.unravel_index(np.argmax(delta_bic, axis=None), delta_bic.shape)
-                if delta_bic[idx] > self.delta_bic_cutoff:
+
+                # Use both the BIC and AIC criterion here to distinguish, we require both to be significant
+                if delta_bic[idx] > self.delta_bic_cutoff and delta_aic[idx] > self.delta_aic_cutoff:
                     total_found += 1
                     n_comp[i, j] = n_comp_cutout[idx]
                     likelihood[i, j] = likelihood_cutout[idx]

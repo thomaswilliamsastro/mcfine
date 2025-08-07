@@ -6,6 +6,8 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Add in AIC criterion alongside BIC, by default this is also 10 like BIC
+* Add option to get initial velocities for LMFIT via iterative derivative spectroscopy
 * Add dependabot.yml
 * Use exact version pins in pyproject.toml
 * Update tutorials since some functions have changed

@@ -15,6 +15,27 @@ are accessed by the ``fit_type`` parameter:
   [fitting_params]
   fit_type = 'lte'  # Can be 'lte', 'radex', or 'pure_gauss'
 
+===============
+Initial guesses
+===============
+
+A significant amount of time is spent in producing the initial
+guesses via ``lmfit``. This is because by default we use basinhopping,
+which works but is slow. The majority of this is because getting initial
+guesses for the velocities is critical, but difficult. We also offer
+a method called ``iterative``, which finds peaks in the spectrum using
+zero-crossings in the derivatives (via specutils). For the total number
+of components, it will iteratively subtract off a model for the flux
+(from previous fits in this iterative step), find peaks in the
+model-subtracted flux (i.e. any unaccounted for emission), and then fit
+all the components simultaneously once again (to avoid biases that can arise
+by fitting one component at a time) in a small window around the various peaks.
+This generally produces identical results in testing to the default method, but
+runs significantly (about a factor 5 for a 4-component fit) faster.
+
+If using ``iterative``, the strong recommendation for the minimization algorith
+is ``powell``.
+
 =======================
 Configurable parameters
 =======================
