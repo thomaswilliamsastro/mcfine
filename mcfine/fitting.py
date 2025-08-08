@@ -6,24 +6,18 @@ import multiprocessing as mp
 import os
 import pickle
 import sys
+import tomllib
 import warnings
 from functools import partial
 
-from specutils import Spectrum
-from specutils.fitting import find_lines_derivative
-from astropy.stats import akaike_info_criterion, bayesian_info_criterion
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
 import astropy.units as u
 import emcee
+from specutils import Spectrum
+from specutils.fitting import find_lines_derivative
 
 NDRADEX_IMPORTED = False
 try:
-    import ndradexhyperfine as ndradex
+    import ndradex
 
     NDRADEX_IMPORTED = True
 except ModuleNotFoundError:
@@ -35,7 +29,7 @@ from scipy.interpolate import RegularGridInterpolator
 from tqdm import tqdm
 from threadpoolctl import threadpool_limits
 
-from .line_info import transition_lines, freq_lines, strength_lines, v_lines
+from .line_info import allowed_lines, transition_lines, freq_lines, strength_lines, v_lines
 from .utils import get_dict_val, check_overwrite, save_fit_dict, load_fit_dict
 
 T_BACKGROUND = 2.73
@@ -54,11 +48,6 @@ ALLOWED_FIT_TYPES = [
 ALLOWED_FIT_METHODS = [
     'mcmc',
     'leastsq',
-]
-
-ALLOWED_LINES = [
-    'n2hp10',
-    'co21',
 ]
 
 CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
@@ -705,7 +694,7 @@ class HyperfineFitter:
 
         # Let us know if ndradex has been imported
         if not NDRADEX_IMPORTED:
-            self.logger.warning("ndradexhyperfine not imported. RT capabilities disabled")
+            self.logger.warning("ndradex not imported. RT capabilities disabled")
 
         if data is None:
             self.logger.warning('data should be provided!')
@@ -773,7 +762,7 @@ class HyperfineFitter:
         self.lmfit_method = lmfit_method
 
         if self.fit_type == "radex" and not NDRADEX_IMPORTED:
-            raise ValueError("Cannot use mode radex if ndradexhyperfine is not installed!")
+            raise ValueError("Cannot use mode radex if ndradex is not installed!")
 
         fit_method = get_dict_val(self.config,
                                   self.config_defaults,
@@ -818,7 +807,7 @@ class HyperfineFitter:
                             logger=self.logger,
                             )
 
-        if line not in ALLOWED_LINES:
+        if line not in allowed_lines:
             self.logger.warning('Line %s not understood!' % line)
             sys.exit()
 
@@ -1581,8 +1570,11 @@ class HyperfineFitter:
                 if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
                     kwargs.pop("minimizer_kwargs", None)
 
-                # Find any NaNs
-                good_idx = np.where(~np.isnan(data))
+                # Find any NaNs in data or error maps
+                good_idx = np.where(np.logical_and(np.isfinite(data),
+                                                   np.isfinite(error)
+                                                   )
+                                    )
 
                 # And the velocity resolution
                 dv = np.abs(np.nanmedian(np.diff(self.vel)))
@@ -1638,9 +1630,21 @@ class HyperfineFitter:
                     params = Parameters()
                     p0_fit = np.array([])
 
+                    # Convolve will fail if there are NaNs in the spectrum,
+                    # so interpolate over them now
+                    data_interp = copy.deepcopy(data)
+
+                    nan_idx = ~np.isfinite(data_interp)
+                    x = np.arange(len(data_interp))
+
+                    data_interp[nan_idx] = np.interp(x[nan_idx],
+                                                     x[~nan_idx],
+                                                     data_interp[~nan_idx],
+                                                     )
+
                     for comp in range(n_comp):
 
-                        it_data = data - it_model
+                        it_data = data_interp - it_model
 
                         # Find lines. We impose no flux cut here
                         spec = Spectrum(flux=it_data * u.K, spectral_axis=self.vel * u.km / u.s)
@@ -1669,7 +1673,6 @@ class HyperfineFitter:
                                 params[key].set(value=lmfit_result.params[key].value)
 
                         for j in range(prop_len):
-
                             b_min = copy.deepcopy(bounds[j][0])
                             b_max = copy.deepcopy(bounds[j][1])
 
