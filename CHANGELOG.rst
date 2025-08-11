@@ -6,6 +6,9 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Fix crash if data has values but error does not
+* Fix crash if NaNs in spectrum when doing derivative spectroscopy
+* Add 21cm HI line to line list
 * Add in AIC criterion alongside BIC, by default this is also 10 like BIC
 * Add option to get initial velocities for LMFIT via iterative derivative spectroscopy
 * Add dependabot.yml

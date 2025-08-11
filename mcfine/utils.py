@@ -1,11 +1,6 @@
 import os
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
 import pickle
+import tomllib
 
 CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
 LOCAL_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'local_defaults.toml')

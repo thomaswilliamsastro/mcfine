@@ -1,3 +1,9 @@
+allowed_lines = [
+    "n2hp10",
+    "co21",
+    "hi21cm"
+]
+
 # RADEX line transition names
 transition_lines = {
     'n2hp10_01': '(1,1,0)-(0,1,1)',
@@ -46,6 +52,7 @@ v_lines = {
     'n2hp10_13': 5.9704,
     'n2hp10_15': 6.9238,
     'co21': 0,
+    'hi21cm': 0,
 }
 
 # Relative line strengths
@@ -58,4 +65,5 @@ strength_lines = {
     'n2hp10_13': 0.156482 + 0.028705,
     'n2hp10_15': 0.037038,
     'co21': 1,
+    'hi21cm': 1,
 }
