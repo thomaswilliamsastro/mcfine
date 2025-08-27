@@ -1964,6 +1964,19 @@ class HyperfineFitter:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
+        # Test hardlinks work
+        hardlinks_supported = True
+        hl_input = os.path.join(input_dir, "hl_test.txt")
+        hl_output = os.path.join(output_dir, "hl_test.txt")
+        os.system(f"touch {hl_input}")
+        try:
+            os.link(hl_input, hl_output)
+        except:
+            hardlinks_supported = False
+
+        os.system(f"rm {hl_output}")
+        os.system(f"rm {hl_input}")
+
         if overwrite:
 
             # Flush out the directory
@@ -2073,6 +2086,7 @@ class HyperfineFitter:
                 # Find the position of maximum change in BIC between pixels.
                 idx = np.unravel_index(np.argmax(delta_bic, axis=None), delta_bic.shape)
 
+                fit_updated = False
                 # Use both the BIC and AIC criterion here to distinguish, we require both to be significant
                 if delta_bic[idx] > self.delta_bic_cutoff and delta_aic[idx] > self.delta_aic_cutoff:
                     total_found += 1
@@ -2081,16 +2095,25 @@ class HyperfineFitter:
 
                     # If we're replacing with a file we've already replaced, pull from the output directory. Else
                     # pull from the input directory.
-
                     input_file = os.path.join(output_dir, '%s_%s_%s.pkl'
                                               % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
                     if not os.path.exists(input_file):
                         input_file = os.path.join(input_dir, '%s_%s_%s.pkl'
                                                   % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
+                    fit_updated = True
 
-                # Move the right file to the new directory
+                # If the fits have been updated, then update the likelihood and save out
+                if fit_updated:
+                    updated_fit_dict = load_fit_dict(input_file)
+                    updated_fit_dict["likelihood"] = likelihood[i, j]
+                    save_fit_dict(updated_fit_dict, output_file)
 
-                os.system('cp %s %s' % (input_file, output_file))
+                # Move the right file to the new directory. Use hardlinks to minimize space if possible
+                else:
+                    if hardlinks_supported:
+                        os.link(input_file, output_file)
+                    else:
+                        os.system('cp %s %s' % (input_file, output_file))
 
         self.logger.info('Number replaced: %d' % total_found)
 
