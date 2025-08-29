@@ -6,6 +6,8 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Ensure likelihood is correctly updated when encouraging spatial coherence
+* Use hardlinks where possible in coherence to minimize space requirements
 * Fix crash if data has values but error does not
 * Fix crash if NaNs in spectrum when doing derivative spectroscopy
 * Add 21cm HI line to line list
