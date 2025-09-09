@@ -6,6 +6,7 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* Add option to reduce the emcee sampler down to a covariance matrix, to minimize space requirement
 * Ensure likelihood is correctly updated when encouraging spatial coherence
 * Use hardlinks where possible in coherence to minimize space requirements
 * Fix crash if data has values but error does not
