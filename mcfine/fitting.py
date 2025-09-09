@@ -777,6 +777,27 @@ class HyperfineFitter:
 
         self.fit_method = fit_method
 
+        # Are we keeping the sampler/covariance matrix?
+        keep_sampler = get_dict_val(self.config,
+                                    self.config_defaults,
+                                    table='fitting_params',
+                                    key='keep_sampler',
+                                    logger=self.logger,
+                                    )
+        self.keep_sampler = keep_sampler
+
+        keep_covariance = get_dict_val(self.config,
+                                       self.config_defaults,
+                                       table='fitting_params',
+                                       key='keep_covariance',
+                                       logger=self.logger,
+                                       )
+        self.keep_covariance = keep_covariance
+
+        # If both are False, frake out
+        if not self.keep_sampler and not self.keep_covariance:
+            raise ValueError("You have to keep around at least one of the sampler and covariance matrix!")
+
         self.dv = np.abs(np.nanmedian(np.diff(self.vel)))
 
         if self.data.ndim == 1:
@@ -1181,15 +1202,22 @@ class HyperfineFitter:
                 data = self.data
                 error = self.error
 
-                n_comp, likelihood, sampler = self.delta_bic_looper(data,
-                                                                    error,
-                                                                    progress=progress,
-                                                                    )
+                n_comp, likelihood, sampler, cov_matrix, cov_med = self.delta_bic_looper(data,
+                                                                                         error,
+                                                                                         progress=progress,
+                                                                                         )
                 if save:
-                    fit_dict = {'sampler': sampler,
-                                'n_comp': n_comp,
-                                'likelihood': likelihood,
+
+                    fit_dict = {"n_comp": n_comp,
+                                "likelihood": likelihood,
                                 }
+                    if self.keep_sampler:
+                        fit_dict["sampler"] = sampler
+                    if self.keep_covariance:
+                        fit_dict["cov"] = {
+                            "matrix": cov_matrix,
+                            "med": cov_med,
+                        }
 
                     save_fit_dict(fit_dict, fit_dict_filename + '.pkl')
 
@@ -1285,15 +1313,22 @@ class HyperfineFitter:
 
             # Limit to a single core to avoid weirdness
             with threadpool_limits(limits=1, user_api=None):
-                n_comp, likelihood, sampler = self.delta_bic_looper(data=data,
-                                                                    error=error,
-                                                                    )
+                n_comp, likelihood, sampler, cov_matrix, cov_med = self.delta_bic_looper(data=data,
+                                                                                         error=error,
+                                                                                         )
 
             if save:
-                fit_dict = {'sampler': sampler,
-                            'n_comp': n_comp,
-                            'likelihood': likelihood,
+
+                fit_dict = {"n_comp": n_comp,
+                            "likelihood": likelihood,
                             }
+                if self.keep_sampler:
+                    fit_dict["sampler"] = sampler
+                if self.keep_covariance:
+                    fit_dict["cov"] = {
+                        "matrix": cov_matrix,
+                        "med": cov_med,
+                    }
 
                 save_fit_dict(fit_dict, cube_fit_dict_filename + '.pkl')
 
@@ -1376,9 +1411,7 @@ class HyperfineFitter:
                                         )
 
             # Calculate max likelihood parameters and BIC
-            flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                             flat=True,
-                                             )
+            flat_samples = self.get_samples(sampler)
             parameter_median = np.nanmedian(flat_samples,
                                             axis=0,
                                             )
@@ -1410,9 +1443,7 @@ class HyperfineFitter:
             max_back_loops = n_comp
 
             for i in range(max_back_loops):
-                flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                                 flat=True,
-                                                 )
+                flat_samples = self.get_samples(sampler)
                 parameter_median = np.nanmedian(flat_samples,
                                                 axis=0,
                                                 )
@@ -1487,9 +1518,7 @@ class HyperfineFitter:
                                                 )
 
                     # Calculate max likelihood parameters and BIC
-                    flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                                     flat=True,
-                                                     )
+                    flat_samples = self.get_samples(sampler)
                     parameter_median = np.nanmedian(flat_samples, axis=0)
                     likelihood = ln_like(theta=parameter_median,
                                          intensity=data,
@@ -1515,7 +1544,12 @@ class HyperfineFitter:
             likelihood = likelihood_old
             n_comp += 1
 
-        return n_comp, likelihood, sampler
+        # Finally, calculate the covariance matrix and the parameter medians
+        samples = self.get_samples(sampler)
+        cov_matrix = np.cov(samples.T)
+        cov_med = np.median(samples, axis=0)
+
+        return n_comp, likelihood, sampler, cov_matrix, cov_med
 
     def run_mcmc(self,
                  data,
@@ -1768,9 +1802,7 @@ class HyperfineFitter:
 
             if save:
                 # Calculate max likelihood
-                flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                                 flat=True,
-                                                 )
+                flat_samples = self.get_samples(sampler)
                 parameter_median = np.nanmedian(flat_samples,
                                                 axis=0,
                                                 )
@@ -1895,6 +1927,17 @@ class HyperfineFitter:
                              )
 
         return sampler
+
+    def get_samples(self,
+                    sampler,
+                    ):
+        """Get samples from an emcee sampler"""
+
+        samples = sampler.get_chain(discard=self.n_steps // 2,
+                                    flat=True,
+                                    )
+
+        return samples
 
     def encourage_spatial_coherence(self,
                                     input_dir='fit',
@@ -2045,13 +2088,19 @@ class HyperfineFitter:
                                                                         '%s_%s_%s.pkl'
                                                                         % (fit_dict_filename, i_full, j_full))
                             cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
-                            cutout_sampler = cutout_fit_dict['sampler']
-                            flat_samples = cutout_sampler.get_chain(discard=self.n_steps // 2,
-                                                                    flat=True,
-                                                                    )
-                            pars_new = np.nanmedian(flat_samples,
-                                                    axis=0,
-                                                    )
+
+                            # If we have the full emcee sampler, prefer that here
+                            if "sampler" in cutout_fit_dict:
+                                cutout_sampler = cutout_fit_dict["sampler"]
+                                flat_samples = self.get_samples(cutout_sampler)
+                                pars_new = np.nanmedian(flat_samples,
+                                                        axis=0,
+                                                        )
+
+                            # Else we have these calculated as part of the covariance matrix
+                            else:
+                                pars_new = copy.deepcopy(cutout_fit_dict["cov"]["med"])
+
                             like_new = ln_like(theta=pars_new,
                                                intensity=self.data[:, i, j],
                                                intensity_err=self.error[:, i, j],
@@ -2281,10 +2330,19 @@ class HyperfineFitter:
         if n_comp_pix == 0:
             return np.zeros([3, len(self.vel)])
         fit_dict = load_fit_dict(cube_sampler_filename)
-        sampler = fit_dict['sampler']
-        flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                         flat=True,
-                                         )
+
+        # If we have the full emcee sampler, prefer that here
+        if "sampler" in fit_dict:
+
+            sampler = fit_dict['sampler']
+            flat_samples = self.get_samples(sampler)
+
+        # Otherwise, sample from the covariance matrix
+        else:
+
+            cov_matrix = fit_dict["cov"]["matrix"]
+            cov_med = fit_dict["cov"]["med"]
+            flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
 
         fit_lines = self.get_fits_from_samples(flat_samples,
                                                vel=self.vel,
@@ -2464,12 +2522,21 @@ class HyperfineFitter:
 
             cube_fit_dict_filename = '%s_%s_%s.pkl' % (fit_dict_filename, i, j)
             fit_dict = load_fit_dict(cube_fit_dict_filename)
-            sampler = fit_dict['sampler']
+
+            # If we have the full emcee sampler, prefer that
+            if "sampler" in fit_dict:
+
+                sampler = fit_dict['sampler']
+                flat_samples = self.get_samples(sampler)
+
+            # Otherwise, pull from the covariance matrix
+            else:
+
+                cov_matrix = fit_dict["cov"]["matrix"]
+                cov_med = fit_dict["cov"]["med"]
+                flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
 
             # Pull out median and errors for each parameter and each component
-            flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                             flat=True,
-                                             )
             param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
             param_diffs = np.diff(param_percentiles, axis=0)
 

@@ -2,6 +2,8 @@
 lmfit_method = 'default'
 fit_type = 'lte'
 fit_method = 'mcmc'
+keep_sampler = true
+keep_covariance = true
 
 line = 'n2hp10'
 rest_freq = ''

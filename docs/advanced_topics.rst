@@ -36,6 +36,18 @@ runs significantly (about a factor 5 for a 4-component fit) faster.
 If using ``iterative``, the strong recommendation for the minimization algorith
 is ``powell``.
 
+============
+Space saving
+============
+
+In some cases it may be worthwhile to try and save as much space as possible
+for the output fit dictionaries. This is especially true for huge datasets
+where the total space requirements can ramp up into the TB. By default,
+the ``fit_dict`` files will contain both the full ``emcee`` sampler and
+information for a covariance matrix. If your corner plots look well-behaved
+(i.e. mostly Gaussian), then you can save a **significant** amount of space
+by setting ``keep_sampler = false`` in ``[fitting_params]``.
+
 =======================
 Configurable parameters
 =======================

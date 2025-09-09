@@ -89,7 +89,11 @@ class HyperfinePlotter(HyperfineFitter):
             fit_dict = load_fit_dict(fit_dict_filename + '.pkl')
 
             n_comp = fit_dict['n_comp']
-            sampler = fit_dict['sampler']
+
+            if "sampler" not in fit_dict:
+                self.logger.warning("Can only produce step plots when emcee sampler is present")
+                return False
+            sampler = fit_dict["sampler"]
 
             if n_comp == 0:
                 return
@@ -159,7 +163,10 @@ class HyperfinePlotter(HyperfineFitter):
             return
         fit_dict = load_fit_dict(cube_fit_dict_filename)
 
-        sampler = fit_dict['sampler']
+        if "sampler" not in fit_dict:
+            self.logger.warning("Can only produce step plots when emcee sampler is present")
+            return False
+        sampler = fit_dict["sampler"]
 
         samples = sampler.get_chain()
         cube_plot_name = plot_name + '_%s_%s' % (i, j)
@@ -286,11 +293,19 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 return
 
-            sampler = fit_dict['sampler']
+            # If we have the full emcee sampler, prefer that
+            if "sampler" in fit_dict:
 
-            flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                             flat=True,
-                                             )
+                sampler = fit_dict['sampler']
+                flat_samples = self.get_samples(sampler)
+
+            # Otherwise, pull from the covariance matrix
+            else:
+
+                cov_matrix = fit_dict["cov"]["matrix"]
+                cov_med = fit_dict["cov"]["med"]
+                flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
+
             self.corner(flat_samples=flat_samples,
                         plot_name=plot_name,
                         n_comp=n_comp,
@@ -358,8 +373,20 @@ class HyperfinePlotter(HyperfineFitter):
         if n_comp_pix == 0:
             return
         fit_dict = load_fit_dict(cube_fit_dict_filename)
-        sampler = fit_dict['sampler']
-        flat_samples = sampler.get_chain(discard=self.n_steps // 2, flat=True)
+
+        # If we have the full emcee sampler, prefer that here
+        if "sampler" in fit_dict:
+
+            sampler = fit_dict['sampler']
+            flat_samples = self.get_samples(sampler)
+
+        # Otherwise, pull from the covariance matrix
+        else:
+
+            cov_matrix = fit_dict["cov"]["matrix"]
+            cov_med = fit_dict["cov"]["med"]
+            flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
+
         cube_plot_name = '%s_%s_%s' % (plot_name, i, j)
         self.corner(flat_samples, plot_name=cube_plot_name, n_comp=n_comp_pix)
 
@@ -382,7 +409,6 @@ class HyperfinePlotter(HyperfineFitter):
             for label in self.labels:
                 labels.append(label % i)
 
-
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             corner.corner(flat_samples, labels=labels, show_titles=True, quantiles=[0.16, 0.5, 0.84])
@@ -395,6 +421,8 @@ class HyperfinePlotter(HyperfineFitter):
             plt.savefig('%s.%s' % (plot_name, file_ext), bbox_inches='tight')
 
         plt.close()
+
+        return True
 
     def plot_fit(self,
                  fit_dict_filename=None,
@@ -483,15 +511,23 @@ class HyperfinePlotter(HyperfineFitter):
 
         if self.data_type == 'spectrum':
             fit_dict = load_fit_dict(fit_dict_filename + '.pkl')
-            sampler = fit_dict['sampler']
             n_comp = fit_dict['n_comp']
 
             if n_comp == 0:
                 flat_samples = None
             else:
-                flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                                 flat=True,
-                                                 )
+
+                # If we have the sampler, prefer that
+                if "sampler" in fit_dict:
+
+                    sampler = fit_dict["sampler"]
+                    flat_samples = self.get_samples(sampler)
+
+                else:
+
+                    cov_matrix = fit_dict["cov"]["matrix"]
+                    cov_med = fit_dict["cov"]["med"]
+                    flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
 
             self.fit(flat_samples=flat_samples,
                      data=self.data,
@@ -579,10 +615,19 @@ class HyperfinePlotter(HyperfineFitter):
         error = self.error[:, i, j]
         if n_comp_pix > 0:
             fit_dict = load_fit_dict(cube_fit_dict_filename)
-            sampler = fit_dict['sampler']
-            flat_samples = sampler.get_chain(discard=self.n_steps // 2,
-                                             flat=True,
-                                             )
+
+            # If we have the full emcee sampler, prefer that here
+            if "sampler" in fit_dict:
+                sampler = fit_dict['sampler']
+                flat_samples = self.get_samples(sampler)
+
+            # Otherwise fall back to the covariance matrix
+            else:
+
+                cov_matrix = fit_dict["cov"]["matrix"]
+                cov_med = fit_dict["cov"]["med"]
+                flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
+
         else:
             flat_samples = None
         cube_plot_name = plot_name + '_%s_%s' % (i, j)
@@ -725,7 +770,6 @@ class HyperfinePlotter(HyperfineFitter):
 
             # Put a cross on the image to show where the pixel is
             if i is not None and j is not None:
-                print(i, j)
                 plt.scatter(j, i,
                             c='lime',
                             marker='x',
