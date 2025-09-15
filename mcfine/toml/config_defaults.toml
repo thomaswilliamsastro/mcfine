@@ -46,8 +46,16 @@ minimizer_kwargs.method = "Powell"
 
 delta_bic_cutoff = 10
 delta_aic_cutoff = 10
+emcee_run_method = "fixed"
 n_walkers = 100
 n_steps = 1000
+
+# Specifically for the adaptive fitting
+convergence_factor = 100
+tau_change = 0.01
+thin = 0.5
+burn_in = 2
+max_steps = 100000
 
 [create_fit_cube]
 

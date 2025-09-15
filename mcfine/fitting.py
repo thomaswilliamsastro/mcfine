@@ -39,6 +39,11 @@ ALLOWED_LMFIT_METHODS = [
     "iterative",
 ]
 
+ALLOWED_EMCEE_RUN_METHODS = [
+    "fixed",
+    "adaptive",
+]
+
 ALLOWED_FIT_TYPES = [
     'lte',
     'pure_gauss',
@@ -933,13 +938,66 @@ class HyperfineFitter:
 
         self.delta_aic_cutoff = delta_aic_cutoff
 
+        emcee_run_method = get_dict_val(self.config,
+                                        self.config_defaults,
+                                        table='mcmc',
+                                        key='emcee_run_method',
+                                        logger=self.logger,
+                                        )
+
+        if emcee_run_method not in ALLOWED_EMCEE_RUN_METHODS:
+            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, not {emcee_run_method}")
+
+        self.emcee_run_method = emcee_run_method
+
+        # Variables for the adaptive fitting method
+        max_steps = get_dict_val(self.config,
+                                 self.config_defaults,
+                                 table='mcmc',
+                                 key='max_steps',
+                                 logger=self.logger,
+                                 )
+        self.max_steps = max_steps
+
+        convergence_factor = get_dict_val(self.config,
+                                          self.config_defaults,
+                                          table='mcmc',
+                                          key='convergence_factor',
+                                          logger=self.logger,
+                                          )
+        self.convergence_factor = convergence_factor
+
+        tau_change = get_dict_val(self.config,
+                                  self.config_defaults,
+                                  table='mcmc',
+                                  key='tau_change',
+                                  logger=self.logger,
+                                  )
+        self.tau_change = tau_change
+
+        thin = get_dict_val(self.config,
+                            self.config_defaults,
+                            table='mcmc',
+                            key='thin',
+                            logger=self.logger,
+                            )
+        self.thin = thin
+
+        burn_in = get_dict_val(self.config,
+                               self.config_defaults,
+                               table='mcmc',
+                               key='burn_in',
+                               logger=self.logger,
+                               )
+        self.burn_in = burn_in
+
+        # Variables for fixed fitting method
         n_steps = get_dict_val(self.config,
                                self.config_defaults,
                                table='mcmc',
                                key='n_steps',
                                logger=self.logger,
                                )
-
         self.n_steps = n_steps
 
         n_walkers = get_dict_val(self.config,
@@ -948,7 +1006,6 @@ class HyperfineFitter:
                                  key='n_walkers',
                                  logger=self.logger,
                                  )
-
         self.n_walkers = n_walkers
 
         n_cores = get_dict_val(self.local,
@@ -1766,7 +1823,14 @@ class HyperfineFitter:
             p0_movement = np.max(np.array([0.01 * np.abs(p0_fit), 0.01 * np.ones_like(p0_fit)]),
                                  axis=0,
                                  )
-            pos = np.array(p0_fit) + p0_movement * np.random.randn(self.n_walkers, n_dims)
+
+            # If we have an adaptive number of walkers, account for that here
+            if isinstance(self.n_walkers, str):
+                n_walkers = int(self.n_walkers.split("*")[0]) * n_dims
+            else:
+                n_walkers = copy.deepcopy(self.n_walkers)
+
+            pos = np.array(p0_fit) + p0_movement * np.random.randn(n_walkers, n_dims)
 
             # Enforce positive values for t_ex, width for the LTE fitting
 
@@ -1795,6 +1859,7 @@ class HyperfineFitter:
             sampler = self.emcee_wrapper(data,
                                          error,
                                          pos=pos,
+                                         n_walkers=n_walkers,
                                          n_dims=n_dims,
                                          n_comp=n_comp,
                                          progress=progress,
@@ -1833,6 +1898,7 @@ class HyperfineFitter:
                       data,
                       error,
                       pos,
+                      n_walkers,
                       n_dims,
                       n_comp=1,
                       progress=False,
@@ -1846,6 +1912,7 @@ class HyperfineFitter:
             data: Observed data
             error: Observed uncertainty
             pos: Position for the walkers
+            n_walkers: Number of emcee walkers
             n_dims: Number of dimensions for the problem
             n_comp: Number of components to fit. Defaults
                 to None
@@ -1858,61 +1925,110 @@ class HyperfineFitter:
             # Multiprocess here for speed
 
             with mp.Pool(self.n_cores) as pool:
-                sampler = emcee.EnsembleSampler(nwalkers=self.n_walkers,
-                                                ndim=n_dims,
-                                                log_prob_fn=ln_prob,
-                                                args=(
-                                                    data,
-                                                    error,
-                                                    self.vel,
-                                                    self.strength_lines,
-                                                    self.v_lines,
-                                                    self.props,
-                                                    self.bounds,
-                                                    n_comp,
-                                                    self.fit_type,
-                                                ),
-                                                moves=[(emcee.moves.DEMove(), 0.8),
-                                                       (emcee.moves.DESnookerMove(), 0.2)
-                                                       ],
+                sampler = self.run_mcmc_sampler(data=data,
+                                                error=error,
+                                                pos=pos,
+                                                n_walkers=n_walkers,
+                                                n_dims=n_dims,
+                                                n_comp=n_comp,
+                                                progress=progress,
                                                 pool=pool,
                                                 )
-
-                # Run burn-in
-                state = sampler.run_mcmc(pos,
-                                         self.n_steps // 4,
-                                         progress=progress,
-                                         )
-                sampler.reset()
-
-                # Do the full run
-                sampler.run_mcmc(state,
-                                 self.n_steps,
-                                 progress=progress,
-                                 )
 
         else:
 
             # Run in serial since the cube is multiprocessing already (no daemons here, not today satan)
-            sampler = emcee.EnsembleSampler(nwalkers=self.n_walkers,
-                                            ndim=n_dims,
-                                            log_prob_fn=ln_prob,
-                                            args=(
-                                                data,
-                                                error,
-                                                self.vel,
-                                                self.strength_lines,
-                                                self.v_lines,
-                                                self.props,
-                                                self.bounds,
-                                                n_comp,
-                                                self.fit_type,
-                                            ),
-                                            moves=[(emcee.moves.DEMove(), 0.8),
-                                                   (emcee.moves.DESnookerMove(), 0.2)
-                                                   ],
+            sampler = self.run_mcmc_sampler(data=data,
+                                            error=error,
+                                            pos=pos,
+                                            n_dims=n_dims,
+                                            n_comp=n_comp,
+                                            progress=progress,
                                             )
 
+        return sampler
+
+    def get_samples(self,
+                    sampler,
+                    ):
+        """Get samples from an emcee sampler"""
+
+        # If we're fixed, then discard half the steps
+        if self.emcee_run_method == "fixed":
+            samples = sampler.get_chain(discard=self.n_steps // 2,
+                                        flat=True,
+                                        )
+
+        # If we're adaptive, use parameters provided as a function
+        # of the autocorrelation length
+        elif self.emcee_run_method == "adaptive":
+
+            tau = sampler.get_autocorr_time(tol=0)
+            burn_in = int(self.burn_in * np.max(tau))
+            thin = int(self.thin * np.min(tau))
+
+            samples = sampler.get_chain(discard=burn_in,
+                                        thin=thin,
+                                        flat=True,
+                                        )
+        else:
+            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
+                             f"not {self.emcee_run_method}")
+
+        return samples
+
+    def run_mcmc_sampler(self,
+                         data,
+                         error,
+                         pos,
+                         n_walkers,
+                         n_dims,
+                         n_comp=1,
+                         progress=False,
+                         pool=None,
+                         ):
+        """Tool for actually running emcee
+
+        There are two options here, fixed and adaptive which
+        determine how long to run the MCMC walkers for. See
+        the docs for more details
+
+        Args:
+            data: Observed data
+            error: Observed uncertainty
+            pos: Position for the walkers
+            n_walkers: Number of emcee walkers
+            n_dims: Number of dimensions for the problem
+            n_comp: Number of components to fit. Defaults
+                to None
+            progress: Whether or not to display progress bar.
+                Defaults to False
+            pool: If running in multiprocessing mode, this
+                is the mp Pool
+        """
+
+        sampler = emcee.EnsembleSampler(nwalkers=n_walkers,
+                                        ndim=n_dims,
+                                        log_prob_fn=ln_prob,
+                                        args=(
+                                            data,
+                                            error,
+                                            self.vel,
+                                            self.strength_lines,
+                                            self.v_lines,
+                                            self.props,
+                                            self.bounds,
+                                            n_comp,
+                                            self.fit_type,
+                                        ),
+                                        moves=[(emcee.moves.DEMove(), 0.8),
+                                               (emcee.moves.DESnookerMove(), 0.2)
+                                               ],
+                                        pool=pool,
+                                        )
+
+        # Simple case where we have the fixed steps
+        if self.emcee_run_method == "fixed":
             # Run burn-in
             state = sampler.run_mcmc(pos,
                                      self.n_steps // 4,
@@ -1926,18 +2042,37 @@ class HyperfineFitter:
                              progress=progress,
                              )
 
+        elif self.emcee_run_method == "adaptive":
+
+            # Set up a tau for testing convergence
+            old_tau = np.inf
+
+            for _ in sampler.sample(pos,
+                                    iterations=self.max_steps,
+                                    progress=progress,
+                                    ):
+
+                # Only check convergence every 100 steps
+                if sampler.iteration % 100:
+                    continue
+
+                # Compute the median autocorrelation time so far
+                # Using tol=0 means that we'll always get an estimate even
+                # if it isn't trustworthy
+                tau = np.nanmedian(sampler.get_autocorr_time(tol=0))
+
+                # Check convergence
+                converged = tau * self.convergence_factor < sampler.iteration
+                converged &= np.abs(old_tau - tau) / tau < self.tau_change
+                if converged:
+                    break
+                old_tau = tau
+
+        else:
+            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
+                             f"not {self.emcee_run_method}")
+
         return sampler
-
-    def get_samples(self,
-                    sampler,
-                    ):
-        """Get samples from an emcee sampler"""
-
-        samples = sampler.get_chain(discard=self.n_steps // 2,
-                                    flat=True,
-                                    )
-
-        return samples
 
     def encourage_spatial_coherence(self,
                                     input_dir='fit',

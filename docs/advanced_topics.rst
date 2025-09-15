@@ -36,6 +36,60 @@ runs significantly (about a factor 5 for a 4-component fit) faster.
 If using ``iterative``, the strong recommendation for the minimization algorith
 is ``powell``.
 
+======================
+``emcee`` optimization
+======================
+
+By default, we use a fixed number of walkers and steps in the emcee run. This
+may not be optimal, so we also offer a couple of adaptive methods.
+
+The first is you can adapt the number of walkers to the number of parameters
+being fitted. A typical rule of thumb is to use **at least** twice the number
+of walkers as parameters. This can be specified in the config file by using
+a string for ``n_walkers`` under the ``[mcmc]`` section: if you use something like
+
+.. code-block:: toml
+
+   n_walkers = "3*n_params"
+
+then the number of walkers will be adapted to the number of components being fit.
+This can effectively speed up the fit and reduce sampler filesizes, without affecting
+the final fit quality
+
+The second is using an adaptive number of steps, checking against an autocorrelation criterion.
+By default, we use a fixed number of steps, using a quarter of these as "burn-in", before a full
+run. Then, when calculating parameters, we will discard the first half of this chain as parameters
+may still be moving around. However, it may be more optimal to use an adaptive number of steps,
+and tune this to some multiple of the autocorrelation length. More details of this can be found
+in `the emcee docs <https://emcee.readthedocs.io/en/stable/tutorials/autocorr/>`_. You
+can switch to this mode like so:
+
+.. code-block:: toml
+
+   [mcmc]
+   emcee_run_method = "adaptive"
+
+this will use another few parameters:
+
+.. code-block:: toml
+
+   [mcmc]
+   convergence_factor = 100
+   tau_change = 0.01
+   thin = 0.5
+   burn_in = 2
+   max_steps = 100000
+
+The first two control when fitting will stop. We will step out of the MCMC run once the chain
+is ``convergence_factor`` times the autocorrelation length, and the change in that factor varies
+by less than a factor of ``tau_change``. To ensure the MCMC doesn't run forever, the maximum number
+of steps is ``max_steps``.
+
+After this, we then use ``thin`` and ``burn_in`` to control how the sampler is pared down for parameter
+estimation. We use a factor of ``burn_in`` time the autocorrelation length to define the burn-in, and then
+thin by a factor of ``thin`` times the autocorrelation length to thin out the chains. For more details on
+these, see the `emcee docs <https://emcee.readthedocs.io/en/stable/tutorials/monitor/>`_.
+
 ============
 Space saving
 ============
