@@ -10,9 +10,9 @@ of ``mcfine``. Assuming we have a fit called something like ``fit_1.pkl``:
         fit_dict_filename = 'fit_1'  # N.B. The .pkl is automatically appended, so you should not have it here
 
         # Step plot
-        plot_name = 'fit_1_step'
+        plot_name = "fit_1_step"
 
-        if not os.path.exists(plot_name + '.png') or overwrite:
+        if not os.path.exists(f"{plot_name}.png") or overwrite:
             hp.plot_step(fit_dict_filename=fit_dict_filename,
                          plot_name=plot_name,
                          )
@@ -28,7 +28,7 @@ We can also make corner plots:
         # Corner plot
         plot_name = 'fit_1_corner'
 
-        if not os.path.exists(plot_name + '.png') or overwrite:
+        if not os.path.exists(f"{plot_name}.png") or overwrite:
             hp.plot_corner(fit_dict_filename=fit_dict_filename,
                            plot_name=plot_name,
                            )
@@ -42,7 +42,7 @@ And probably the most useful, the actual fit to the data:
         # Fit plot
         plot_name = 'fit_1'
 
-        if not os.path.exists(plot_name + '.png') or overwrite:
+        if not os.path.exists(f"{plot_name}.png") or overwrite:
             hp.plot_corner(fit_dict_filename=fit_dict_filename,
                            plot_name=plot_name,
                            )

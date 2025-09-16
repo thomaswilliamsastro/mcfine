@@ -14,20 +14,20 @@ these ``local.toml`` and ``config.toml``. A local.toml file will look something 
 
   [local]
 
-  base_dir = '/Users/username/mcfine_fits'
+  base_dir = "/Users/username/mcfine_fits"
 
-  fit_dir = 'fit'
-  plot_dir = 'plot'
+  fit_dir = "fit"
+  plot_dir = "plot"
 
 And a config.toml file like:
 
 .. code-block:: toml
 
   [fitting_params]
-  fit_type = 'lte'
-  fit_method = 'mcmc'
+  fit_type = "lte"
+  fit_method = "mcmc"
 
-  line = 'n2hp10'
+  line = "n2hp10"
 
   [initial_guess]
 
@@ -38,13 +38,13 @@ Taking the ``data``, ``vel``, and ``error_spectrum`` from the
 
 .. code-block:: python
 
-    from mcfine.fitting import HyperfineFitter
+    from mcfine import HyperfineFitter
 
     fit_dir = "fit"
 
-    fit_dict_filename = os.path.join(fit_dir, 'fit_dict')
+    fit_dict_filename = os.path.join(fit_dir, "fit_dict")
 
-    if not os.path.exists(fit_dict_filename + '.pkl') or overwrite_fits:
+    if not os.path.exists(f"{fit_dict_filename}.pkl") or overwrite_fits:
         hf = HyperfineFitter(
             data=spectrum_obs,
             vel=vel,

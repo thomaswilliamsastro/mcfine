@@ -12,8 +12,13 @@ from functools import partial
 
 import astropy.units as u
 import emcee
+import numpy as np
+from lmfit import minimize, Parameters
+from scipy.interpolate import RegularGridInterpolator
 from specutils import Spectrum
 from specutils.fitting import find_lines_derivative
+from threadpoolctl import threadpool_limits
+from tqdm import tqdm
 
 NDRADEX_IMPORTED = False
 try:
@@ -23,14 +28,21 @@ try:
 except ModuleNotFoundError:
     pass
 
-import numpy as np
-from lmfit import minimize, Parameters
-from scipy.interpolate import RegularGridInterpolator
-from tqdm import tqdm
-from threadpoolctl import threadpool_limits
-
-from .line_info import allowed_lines, transition_lines, freq_lines, strength_lines, v_lines
-from .utils import get_dict_val, check_overwrite, save_fit_dict, load_fit_dict
+from .line_info import (
+    allowed_lines,
+    transition_lines,
+    freq_lines,
+    strength_lines,
+    v_lines,
+)
+from .utils import (
+    get_dict_val,
+    check_overwrite,
+    save_fit_dict,
+    load_fit_dict,
+    CONFIG_DEFAULT_PATH,
+    LOCAL_DEFAULT_PATH,
+)
 
 T_BACKGROUND = 2.73
 
@@ -45,41 +57,25 @@ ALLOWED_EMCEE_RUN_METHODS = [
 ]
 
 ALLOWED_FIT_TYPES = [
-    'lte',
-    'pure_gauss',
-    'radex',
+    "lte",
+    "pure_gauss",
+    "radex",
 ]
 
 ALLOWED_FIT_METHODS = [
-    'mcmc',
-    'leastsq',
+    "mcmc",
+    "leastsq",
 ]
-
-CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
-LOCAL_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'local_defaults.toml')
 
 radex_grid = {}
 
-mp.set_start_method('fork')
+mp.set_start_method("fork")
 
 
-def round_nearest(x,
-                  a,
-                  ):
-    """Round x to the nearest a
-
-    Args:
-        x: value to round
-        a: value to round to
-
-    """
-
-    return round(round(x / a) * a, -int(np.floor(np.log10(a))))
-
-
-def get_nearest_value(data,
-                      value,
-                      ):
+def get_nearest_value(
+    data,
+    value,
+):
     """Get the nearest value in a dataset
 
     Args:
@@ -118,10 +114,11 @@ def get_nearest_value(data,
     return nearest_value
 
 
-def get_nearest_values(dataset,
-                       keys,
-                       values,
-                       ):
+def get_nearest_values(
+    dataset,
+    keys,
+    values,
+):
     """Function to parallelise get_nearest_value
 
     Args:
@@ -133,17 +130,20 @@ def get_nearest_values(dataset,
         list of the nearest values
     """
 
-    nearest_values_list = [get_nearest_value(dataset[keys[i]].values, values[i])
-                           for i in range(len(values))]
+    nearest_values_list = [
+        get_nearest_value(dataset[keys[i]].values, values[i])
+        for i in range(len(values))
+    ]
 
     return nearest_values_list
 
 
-def gaussian(x,
-             amp,
-             centre,
-             width,
-             ):
+def gaussian(
+    x,
+    amp,
+    centre,
+    width,
+):
     """Evaluate a Gaussian on a 1D grid.
 
     Calculates a Gaussian, using :math:`f(x) = A \\exp[-0.5(x - \\mu)^2/\\sigma^2]`.
@@ -158,14 +158,15 @@ def gaussian(x,
         np.ndarray: Gaussian model array
     """
 
-    y = amp * np.exp(- (x - centre) ** 2 / (2 * width ** 2))
+    y = amp * np.exp(-((x - centre) ** 2) / (2 * width**2))
     return y
 
 
-def residual(observed,
-             model,
-             observed_error=None,
-             ):
+def residual(
+    observed,
+    model,
+    observed_error=None,
+):
     """Calculate standard residual.
 
     If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})/{\\rm error}`. Else the sum of
@@ -189,10 +190,11 @@ def residual(observed,
     return res
 
 
-def chi_square(observed,
-               model,
-               observed_error=None,
-               ):
+def chi_square(
+    observed,
+    model,
+    observed_error=None,
+):
     """Calculate standard chi-square.
 
     If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})^2/{\\rm error}^2`. Else the sum of
@@ -209,21 +211,22 @@ def chi_square(observed,
     """
 
     res = residual(observed, model, observed_error)
-    chisq = np.nansum(res ** 2)
+    chisq = np.nansum(res**2)
 
     return chisq
 
 
-def hyperfine_structure_lte(t_ex,
-                            tau,
-                            v_centre,
-                            line_width,
-                            strength_lines,
-                            v_lines,
-                            vel,
-                            return_hyperfine_components=False,
-                            log_tau=True,
-                            ):
+def hyperfine_structure_lte(
+    t_ex,
+    tau,
+    v_centre,
+    line_width,
+    strength_lines,
+    v_lines,
+    vel,
+    return_hyperfine_components=False,
+    log_tau=True,
+):
     """Create hyperfine intensity profile.
 
     Takes line strengths and relative velocity centres, along with excitation temperature and optical depth to
@@ -250,8 +253,9 @@ def hyperfine_structure_lte(t_ex,
     else:
         strength = tau * strength_lines
 
-    tau_components = gaussian(vel[:, np.newaxis], strength, v_lines + v_centre,
-                              line_width)
+    tau_components = gaussian(
+        vel[:, np.newaxis], strength, v_lines + v_centre, line_width
+    )
 
     total_tau = np.nansum(tau_components, axis=-1)
     intensity_total = (1 - np.exp(-total_tau)) * (t_ex - T_BACKGROUND)
@@ -263,14 +267,15 @@ def hyperfine_structure_lte(t_ex,
         return intensity_components, intensity_total
 
 
-def hyperfine_structure_pure_gauss(t,
-                                   v_centre,
-                                   line_width,
-                                   strength_lines,
-                                   v_lines,
-                                   vel,
-                                   return_hyperfine_components=False,
-                                   ):
+def hyperfine_structure_pure_gauss(
+    t,
+    v_centre,
+    line_width,
+    strength_lines,
+    v_lines,
+    vel,
+    return_hyperfine_components=False,
+):
     """Create hyperfine intensity profile for a pure Gaussian profile.
 
     Takes line strengths and relative velocity centres, along with peak temperature to
@@ -290,11 +295,9 @@ def hyperfine_structure_pure_gauss(t,
             intensity for all components
     """
 
-    intensity_components = gaussian(vel[:, np.newaxis],
-                                    t * strength_lines,
-                                    v_lines + v_centre,
-                                    line_width
-                                    )
+    intensity_components = gaussian(
+        vel[:, np.newaxis], t * strength_lines, v_lines + v_centre, line_width
+    )
 
     intensity_total = np.nansum(intensity_components, axis=-1)
 
@@ -304,14 +307,15 @@ def hyperfine_structure_pure_gauss(t,
         return intensity_components, intensity_total
 
 
-def hyperfine_structure_radex(t_ex,
-                              tau,
-                              v_centre,
-                              line_width,
-                              v_lines,
-                              vel,
-                              return_hyperfine_components=False,
-                              ):
+def hyperfine_structure_radex(
+    t_ex,
+    tau,
+    v_centre,
+    line_width,
+    v_lines,
+    vel,
+    return_hyperfine_components=False,
+):
     """Create hyperfine intensity profile using RADEX.
 
     Takes line strengths and relative velocity centres calculated with RADEX, and produces a spectrum.
@@ -330,8 +334,7 @@ def hyperfine_structure_radex(t_ex,
             intensity for all components
     """
 
-    tau_components = gaussian(vel[:, np.newaxis], tau, v_lines + v_centre,
-                              line_width)
+    tau_components = gaussian(vel[:, np.newaxis], tau, v_lines + v_centre, line_width)
 
     intensity_components = (1 - np.exp(-tau_components)) * (t_ex - T_BACKGROUND)
 
@@ -343,15 +346,16 @@ def hyperfine_structure_radex(t_ex,
         return intensity_components, intensity_total
 
 
-def multiple_components(theta,
-                        vel,
-                        strength_lines,
-                        v_lines,
-                        props,
-                        n_comp,
-                        fit_type='lte',
-                        log_tau=True,
-                        ):
+def multiple_components(
+    theta,
+    vel,
+    strength_lines,
+    v_lines,
+    props,
+    n_comp,
+    fit_type="lte",
+    log_tau=True,
+):
     """Sum intensities for multiple lines.
 
     Takes `n_comp` distinct lines, and calculates the total intensity of their various hyperfine lines.
@@ -375,42 +379,61 @@ def multiple_components(theta,
     if n_comp == 0:
         return np.zeros_like(vel)
 
-    if fit_type == 'lte':
+    if fit_type == "lte":
 
-        intensity_model = np.array([hyperfine_structure_lte(*theta[prop_len * i: prop_len * i + prop_len],
-                                                            strength_lines, v_lines, vel, log_tau=log_tau)
-                                    for i in range(n_comp)])
+        intensity_model = np.array(
+            [
+                hyperfine_structure_lte(
+                    *theta[prop_len * i : prop_len * i + prop_len],
+                    strength_lines,
+                    v_lines,
+                    vel,
+                    log_tau=log_tau,
+                )
+                for i in range(n_comp)
+            ]
+        )
 
-    elif fit_type == 'pure_gauss':
+    elif fit_type == "pure_gauss":
 
-        intensity_model = np.array([hyperfine_structure_pure_gauss(*theta[prop_len * i: prop_len * i + prop_len],
-                                                                   strength_lines,
-                                                                   v_lines,
-                                                                   vel
-                                                                   )
-                                    for i in range(n_comp)])
+        intensity_model = np.array(
+            [
+                hyperfine_structure_pure_gauss(
+                    *theta[prop_len * i : prop_len * i + prop_len],
+                    strength_lines,
+                    v_lines,
+                    vel,
+                )
+                for i in range(n_comp)
+            ]
+        )
 
-    elif fit_type == 'radex':
+    elif fit_type == "radex":
 
-        qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
+        qn_ul = np.array(range(len(radex_grid["QN_ul"].values)))
 
-        intensity_model = [get_radex_multiple_components(theta[prop_len * i: prop_len * i + prop_len],
-                                                         vel, v_lines, qn_ul) for i in range(n_comp)]
+        intensity_model = [
+            get_radex_multiple_components(
+                theta[prop_len * i : prop_len * i + prop_len], vel, v_lines, qn_ul
+            )
+            for i in range(n_comp)
+        ]
 
     else:
 
-        raise Warning('fit type %s not understood!' % fit_type)
+        raise Warning(f"fit type {fit_type} not understood!")
 
     intensity_model = np.sum(intensity_model, axis=0)
 
     return intensity_model
 
 
-def get_radex_multiple_components(theta,
-                                  vel,
-                                  v_lines,
-                                  qn_ul,
-                                  ):
+def get_radex_multiple_components(
+    theta,
+    vel,
+    v_lines,
+    qn_ul,
+):
     """Wrapper around RADEX to get out the multiple components"""
 
     # Important point here, RADEX uses a square profile so transform the sigma into the right width. Pull out
@@ -418,15 +441,18 @@ def get_radex_multiple_components(theta,
 
     tau, t_ex = radex_grid_interp(theta, qn_ul)
 
-    intensity_model = hyperfine_structure_radex(t_ex, tau, theta[3], theta[4], v_lines, vel)
+    intensity_model = hyperfine_structure_radex(
+        t_ex, tau, theta[3], theta[4], v_lines, vel
+    )
 
     return intensity_model
 
 
-def radex_grid_interp(theta,
-                      qn_ul,
-                      labels=None,
-                      ):
+def radex_grid_interp(
+    theta,
+    qn_ul,
+    labels=None,
+):
     """Interpolate generated RADEX grid to get useful values out without weird edge effects
 
     Args:
@@ -439,22 +465,36 @@ def radex_grid_interp(theta,
     """
 
     if labels is None:
-        labels = ['T_kin', 'N_mol', 'n_H2', 'dv']
+        labels = [
+            "T_kin",
+            "N_mol",
+            "n_H2",
+            "dv",
+        ]
 
     nearest_values = get_nearest_values(
-        radex_grid, labels,
-        [theta[0], 10 ** theta[1], 10 ** theta[2], theta[4] * 2.355])
+        radex_grid, labels, [theta[0], 10 ** theta[1], 10 ** theta[2], theta[4] * 2.355]
+    )
 
     # Pull out grid subset of the nearest values
-    grid_subset = radex_grid.sel(T_kin=nearest_values[0], N_mol=nearest_values[1], n_H2=nearest_values[2],
-                                 dv=nearest_values[3])
-    tau_subset = grid_subset['tau'].values
-    t_ex_subset = grid_subset['T_ex'].values
+    grid_subset = radex_grid.sel(
+        T_kin=nearest_values[0],
+        N_mol=nearest_values[1],
+        n_H2=nearest_values[2],
+        dv=nearest_values[3],
+    )
+    tau_subset = grid_subset["tau"].values
+    t_ex_subset = grid_subset["T_ex"].values
 
     # Remove any singular (limit) values
-    limit_vals = [True if type(nearest_value) == np.ndarray else False for nearest_value in nearest_values]
+    limit_vals = [
+        True if type(nearest_value) == np.ndarray else False
+        for nearest_value in nearest_values
+    ]
 
-    theta_coords = np.array([theta[0], 10 ** theta[1], 10 ** theta[2], theta[4] * 2.355])
+    theta_coords = np.array(
+        [theta[0], 10 ** theta[1], 10 ** theta[2], theta[4] * 2.355]
+    )
     theta_coords = theta_coords[limit_vals]
 
     # Also remove the singular dimensions from the nearest values in the grid
@@ -474,17 +514,18 @@ def radex_grid_interp(theta,
     return tau, t_ex
 
 
-def initial_lmfit(params,
-                  intensity,
-                  intensity_err,
-                  vel,
-                  strength_lines,
-                  v_lines,
-                  props,
-                  n_comp=1,
-                  fit_type='lte',
-                  log_tau=True,
-                  ):
+def initial_lmfit(
+    params,
+    intensity,
+    intensity_err,
+    vel,
+    strength_lines,
+    v_lines,
+    props,
+    n_comp=1,
+    fit_type="lte",
+    log_tau=True,
+):
     """Get initial guess for MC walkers from lmfit
 
     This is the residual calculation for LMFIT. Just to get our initial
@@ -508,32 +549,34 @@ def initial_lmfit(params,
 
     theta = np.array([params[key].value for key in params])
 
-    intensity_model = multiple_components(theta=theta,
-                                          vel=vel,
-                                          strength_lines=strength_lines,
-                                          v_lines=v_lines,
-                                          props=props,
-                                          n_comp=n_comp,
-                                          fit_type=fit_type,
-                                          log_tau=log_tau,
-                                          )
+    intensity_model = multiple_components(
+        theta=theta,
+        vel=vel,
+        strength_lines=strength_lines,
+        v_lines=v_lines,
+        props=props,
+        n_comp=n_comp,
+        fit_type=fit_type,
+        log_tau=log_tau,
+    )
     diff = intensity - intensity_model
     residual = diff / intensity_err
 
     return residual
 
 
-def ln_like(theta,
-            intensity,
-            intensity_err,
-            vel,
-            strength_lines,
-            v_lines,
-            props,
-            n_comp=1,
-            fit_type='lte',
-            log_tau=True,
-            ):
+def ln_like(
+    theta,
+    intensity,
+    intensity_err,
+    vel,
+    strength_lines,
+    v_lines,
+    props,
+    n_comp=1,
+    fit_type="lte",
+    log_tau=True,
+):
     """Calculate the (negative) log-likelihood for the model
 
     This is the main meat of the MCMC fitting, given the
@@ -557,8 +600,16 @@ def ln_like(theta,
         Negative ln-likelihood for the model.
     """
 
-    intensity_model = multiple_components(theta, vel, strength_lines, v_lines, props, n_comp=n_comp, fit_type=fit_type,
-                                          log_tau=log_tau)
+    intensity_model = multiple_components(
+        theta,
+        vel,
+        strength_lines,
+        v_lines,
+        props,
+        n_comp=n_comp,
+        fit_type=fit_type,
+        log_tau=log_tau,
+    )
     chisq = chi_square(intensity, intensity_model, intensity_err)
 
     # # Scale the chisq by sqrt(2[N-P]), following Smith+ and others
@@ -570,17 +621,18 @@ def ln_like(theta,
     return -0.5 * chisq
 
 
-def ln_prob(theta,
-            intensity,
-            intensity_err,
-            vel,
-            strength_lines,
-            v_lines,
-            props,
-            bounds,
-            n_comp=1,
-            fit_type='lte',
-            ):
+def ln_prob(
+    theta,
+    intensity,
+    intensity_err,
+    vel,
+    strength_lines,
+    v_lines,
+    props,
+    bounds,
+    n_comp=1,
+    fit_type="lte",
+):
     """Calculate the ln-probability for emcee
 
     This combines the prior (generally flat) with the ln-likelihood
@@ -605,17 +657,27 @@ def ln_prob(theta,
     lp = ln_prior(theta, vel, props, bounds, n_comp=n_comp)
     if not np.isfinite(lp):
         return -np.inf
-    like = ln_like(theta, intensity, intensity_err, vel, strength_lines, v_lines, props,
-                   n_comp=n_comp, fit_type=fit_type)
+    like = ln_like(
+        theta,
+        intensity,
+        intensity_err,
+        vel,
+        strength_lines,
+        v_lines,
+        props,
+        n_comp=n_comp,
+        fit_type=fit_type,
+    )
     return lp + like
 
 
-def ln_prior(theta,
-             vel,
-             props,
-             bounds,
-             n_comp=1,
-             ):
+def ln_prior(
+    theta,
+    vel,
+    props,
+    bounds,
+    n_comp=1,
+):
     """Apply flat priors to the emcee fitting
 
     This also ensures any velocity components are strictly increasing,
@@ -639,7 +701,9 @@ def ln_prior(theta,
 
         values = np.array([theta[prop_len * i + prop] for i in range(n_comp)])
 
-        if not np.logical_and(bounds[prop][0] <= values, values <= bounds[prop][1]).all():
+        if not np.logical_and(
+            bounds[prop][0] <= values, values <= bounds[prop][1]
+        ).all():
             return -np.inf
 
     if n_comp > 1:
@@ -647,7 +711,7 @@ def ln_prior(theta,
         dv = np.abs(np.nanmedian(np.diff(vel)))
 
         # Insist on monotonically increasing velocity components
-        v_idx = np.where(np.asarray(props) == 'v')[0][0]
+        v_idx = np.where(np.asarray(props) == "v")[0][0]
 
         vels = np.array([theta[prop_len * i + v_idx] for i in range(n_comp)])
         vel_diffs = np.diff(vels)
@@ -662,13 +726,13 @@ def ln_prior(theta,
 class HyperfineFitter:
 
     def __init__(
-            self,
-            data=None,
-            vel=None,
-            error=None,
-            mask=None,
-            config_file=None,
-            local_file=None,
+        self,
+        data=None,
+        vel=None,
+        error=None,
+        mask=None,
+        config_file=None,
+        local_file=None,
     ):
         """Multi-component, hyperfine MCMC line fitting.
 
@@ -688,13 +752,12 @@ class HyperfineFitter:
         Todo:
             * Bounds as parameters to input here.
             * Test the radex fitting routines on cubes.
-            * Covariance matrices for the MCMC chains so we can plot errors for each component
-
         """
 
-        logging.basicConfig(level=logging.INFO,
-                            format='[%(levelname)s] %(asctime)s - %(name)s - %(funcName)s - %(message)s',
-                            )
+        logging.basicConfig(
+            level=logging.INFO,
+            format="[%(levelname)s] %(asctime)s - %(name)s - %(funcName)s - %(message)s",
+        )
         self.logger = logging.getLogger(__name__)
 
         # Let us know if ndradex has been imported
@@ -702,36 +765,38 @@ class HyperfineFitter:
             self.logger.warning("ndradex not imported. RT capabilities disabled")
 
         if data is None:
-            self.logger.warning('data should be provided!')
+            self.logger.warning("data should be provided!")
             sys.exit()
         if vel is None:
-            self.logger.warning('velocity definition should be provided! Defaulting to monotonically increasing')
+            self.logger.warning(
+                "velocity definition should be provided! Defaulting to monotonically increasing"
+            )
             vel = np.arange(data.shape[0])
         if error is None:
-            self.logger.info('No error provided. Defaulting to 0')
+            self.logger.info("No error provided. Defaulting to 0")
             error = np.zeros_like(data)
 
         self.data = data
         self.vel = vel
         self.error = error
 
-        with open(CONFIG_DEFAULT_PATH, 'rb') as f:
+        with open(CONFIG_DEFAULT_PATH, "rb") as f:
             config_defaults = tomllib.load(f)
-        with open(LOCAL_DEFAULT_PATH, 'rb') as f:
+        with open(LOCAL_DEFAULT_PATH, "rb") as f:
             local_defaults = tomllib.load(f)
 
         if config_file is not None:
-            with open(config_file, 'rb') as f:
+            with open(config_file, "rb") as f:
                 config = tomllib.load(f)
         else:
-            self.logger.info('No config file provided. Using in-built defaults')
+            self.logger.info("No config file provided. Using in-built defaults")
             config = copy.deepcopy(config_defaults)
 
         if local_file is not None:
-            with open(local_file, 'rb') as f:
+            with open(local_file, "rb") as f:
                 local = tomllib.load(f)
         else:
-            self.logger.info('No local file provided. Using in-built defaults')
+            self.logger.info("No local file provided. Using in-built defaults")
             local = copy.deepcopy(local_defaults)
 
         self.config = config
@@ -740,28 +805,32 @@ class HyperfineFitter:
         self.config_defaults = config_defaults
         self.local_defaults = local_defaults
 
-        fit_type = get_dict_val(self.config,
-                                self.config_defaults,
-                                table='fitting_params',
-                                key='fit_type',
-                                logger=self.logger,
-                                )
+        fit_type = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="fit_type",
+            logger=self.logger,
+        )
 
         if fit_type not in ALLOWED_FIT_TYPES:
-            self.logger.warning('Fit type %s not understood!' % fit_type)
+            self.logger.warning(f"Fit type {fit_type} not understood!")
             sys.exit()
 
         self.fit_type = fit_type
 
-        lmfit_method = get_dict_val(self.config,
-                                    self.config_defaults,
-                                    table="fitting_params",
-                                    key="lmfit_method",
-                                    logger=self.logger,
-                                    )
+        lmfit_method = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="lmfit_method",
+            logger=self.logger,
+        )
 
         if lmfit_method not in ALLOWED_LMFIT_METHODS:
-            self.logger.warning(f'lmfit_method should be one of {ALLOWED_LMFIT_METHODS}!')
+            self.logger.warning(
+                f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}!"
+            )
             sys.exit()
 
         self.lmfit_method = lmfit_method
@@ -769,83 +838,97 @@ class HyperfineFitter:
         if self.fit_type == "radex" and not NDRADEX_IMPORTED:
             raise ValueError("Cannot use mode radex if ndradex is not installed!")
 
-        fit_method = get_dict_val(self.config,
-                                  self.config_defaults,
-                                  table='fitting_params',
-                                  key='fit_method',
-                                  logger=self.logger,
-                                  )
+        fit_method = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="fit_method",
+            logger=self.logger,
+        )
 
         if fit_method not in ALLOWED_FIT_METHODS:
-            self.logger.warning('Fitting procedure %s not understood!' % fit_method)
+            self.logger.warning(f"Fitting procedure {fit_method} not understood!")
             sys.exit()
 
         self.fit_method = fit_method
 
         # Are we keeping the sampler/covariance matrix?
-        keep_sampler = get_dict_val(self.config,
-                                    self.config_defaults,
-                                    table='fitting_params',
-                                    key='keep_sampler',
-                                    logger=self.logger,
-                                    )
+        keep_sampler = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="keep_sampler",
+            logger=self.logger,
+        )
         self.keep_sampler = keep_sampler
 
-        keep_covariance = get_dict_val(self.config,
-                                       self.config_defaults,
-                                       table='fitting_params',
-                                       key='keep_covariance',
-                                       logger=self.logger,
-                                       )
+        keep_covariance = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="keep_covariance",
+            logger=self.logger,
+        )
         self.keep_covariance = keep_covariance
 
         # If both are False, frake out
         if not self.keep_sampler and not self.keep_covariance:
-            raise ValueError("You have to keep around at least one of the sampler and covariance matrix!")
+            raise ValueError(
+                "You have to keep around at least one of the sampler and covariance matrix!"
+            )
 
         self.dv = np.abs(np.nanmedian(np.diff(self.vel)))
 
         if self.data.ndim == 1:
-            self.data_type = 'spectrum'
+            self.data_type = "spectrum"
         else:
-            self.data_type = 'cube'
+            self.data_type = "cube"
 
-        self.logger.info('Detected data type as %s' % self.data_type)
+        self.logger.info(f"Detected data type as {self.data_type}")
 
-        if self.data_type == 'cube':
+        if self.data_type == "cube":
 
             if mask is None:
-                self.logger.info('No mask provided. Including every pixel')
+                self.logger.info("No mask provided. Including every pixel")
                 mask = np.ones([data.shape[1], data.shape[2]])
             self.mask = mask
 
             if self.data.shape != self.error.shape:
-                self.logger.warning('Data and error should be the same shape')
+                self.logger.warning("Data and error should be the same shape")
                 sys.exit()
             if self.data.shape[1:] != self.mask.shape:
-                self.logger.warning('Mask should be 2D projection of data')
+                self.logger.warning("Mask should be 2D projection of data")
                 sys.exit()
 
-        line = get_dict_val(self.config,
-                            self.config_defaults,
-                            table='fitting_params',
-                            key='line',
-                            logger=self.logger,
-                            )
+        line = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="line",
+            logger=self.logger,
+        )
 
         if line not in allowed_lines:
-            self.logger.warning('Line %s not understood!' % line)
+            self.logger.warning(f"Line {line} not understood!")
             sys.exit()
 
         self.line = line
 
-        if self.fit_type == 'lte':
+        if self.fit_type == "lte":
 
             self.strength_lines = np.array(
-                [strength_lines[line_name] for line_name in strength_lines.keys() if self.line in line_name]
+                [
+                    strength_lines[line_name]
+                    for line_name in strength_lines.keys()
+                    if self.line in line_name
+                ]
             )
             self.v_lines = np.array(
-                [v_lines[line_name] for line_name in v_lines.keys() if self.line in line_name]
+                [
+                    v_lines[line_name]
+                    for line_name in v_lines.keys()
+                    if self.line in line_name
+                ]
             )
             self.bounds = [
                 (T_BACKGROUND, 1e3),
@@ -854,13 +937,21 @@ class HyperfineFitter:
                 (self.dv / 2.355, 500),
             ]
 
-        elif self.fit_type == 'pure_gauss':
+        elif self.fit_type == "pure_gauss":
 
             self.strength_lines = np.array(
-                [strength_lines[line_name] for line_name in strength_lines.keys() if self.line in line_name]
+                [
+                    strength_lines[line_name]
+                    for line_name in strength_lines.keys()
+                    if self.line in line_name
+                ]
             )
             self.v_lines = np.array(
-                [v_lines[line_name] for line_name in v_lines.keys() if self.line in line_name]
+                [
+                    v_lines[line_name]
+                    for line_name in v_lines.keys()
+                    if self.line in line_name
+                ]
             )
             self.bounds = [
                 (0, 1e3),
@@ -868,209 +959,236 @@ class HyperfineFitter:
                 (self.dv / 2.355, 500),
             ]
 
-        elif self.fit_type == 'radex':
+        elif self.fit_type == "radex":
 
-            rest_freq = get_dict_val(self.config,
-                                     self.config_defaults,
-                                     table='fitting_params',
-                                     key='rest_freq',
-                                     logger=self.logger,
-                                     )
+            rest_freq = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="fitting_params",
+                key="rest_freq",
+                logger=self.logger,
+            )
 
-            if rest_freq == '':
-                self.logger.warning('rest_freq should be defined')
+            if rest_freq == "":
+                self.logger.warning("rest_freq should be defined")
                 sys.exit()
             if isinstance(rest_freq, float) or isinstance(rest_freq, int):
                 rest_freq = rest_freq * u.GHz
 
             self.strength_lines = None
             self.transitions = [
-                transition_lines[line_name] for line_name in transition_lines.keys() if self.line in line_name
+                transition_lines[line_name]
+                for line_name in transition_lines.keys()
+                if self.line in line_name
             ]
-            freq = np.array(
-                [freq_lines[line_name] for line_name in freq_lines.keys() if self.line in line_name]
-            ) * u.GHz
+            freq = (
+                np.array(
+                    [
+                        freq_lines[line_name]
+                        for line_name in freq_lines.keys()
+                        if self.line in line_name
+                    ]
+                )
+                * u.GHz
+            )
             freq_to_vel = u.doppler_radio(rest_freq)
             self.v_lines = freq.to(u.km / u.s, equivalencies=freq_to_vel).value
             self.bounds = [
                 (T_BACKGROUND, 75),
-                (13, 15), (5, 8),
+                (13, 15),
+                (5, 8),
                 (np.nanmin(self.vel), np.nanmax(self.vel)),
                 (self.dv / 2.355, 500),
             ]
 
-            radex_datafile = get_dict_val(self.local,
-                                          self.local_defaults,
-                                          table='local',
-                                          key='radex_datafile',
-                                          logger=self.logger,
-                                          )
+            radex_datafile = get_dict_val(
+                self.local,
+                self.local_defaults,
+                table="local",
+                key="radex_datafile",
+                logger=self.logger,
+            )
 
             self.radex_datafile = radex_datafile
 
-        p0 = get_dict_val(self.config,
-                          self.config_defaults,
-                          table='initial_guess',
-                          key=fit_type,
-                          logger=self.logger,
-                          )
+        p0 = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="initial_guess",
+            key=fit_type,
+            logger=self.logger,
+        )
         self.p0 = p0
 
         if not len(self.bounds) == len(self.p0):
-            self.logger.warning('bounds and p0 should have the same length!')
+            self.logger.warning("bounds and p0 should have the same length!")
             sys.exit()
 
-        delta_bic_cutoff = get_dict_val(self.config,
-                                        self.config_defaults,
-                                        table='mcmc',
-                                        key='delta_bic_cutoff',
-                                        logger=self.logger,
-                                        )
+        delta_bic_cutoff = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="delta_bic_cutoff",
+            logger=self.logger,
+        )
 
         self.delta_bic_cutoff = delta_bic_cutoff
 
-        delta_aic_cutoff = get_dict_val(self.config,
-                                        self.config_defaults,
-                                        table='mcmc',
-                                        key='delta_aic_cutoff',
-                                        logger=self.logger,
-                                        )
+        delta_aic_cutoff = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="delta_aic_cutoff",
+            logger=self.logger,
+        )
 
         self.delta_aic_cutoff = delta_aic_cutoff
 
-        emcee_run_method = get_dict_val(self.config,
-                                        self.config_defaults,
-                                        table='mcmc',
-                                        key='emcee_run_method',
-                                        logger=self.logger,
-                                        )
+        emcee_run_method = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="emcee_run_method",
+            logger=self.logger,
+        )
 
         if emcee_run_method not in ALLOWED_EMCEE_RUN_METHODS:
-            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, not {emcee_run_method}")
+            raise ValueError(
+                f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, not {emcee_run_method}"
+            )
 
         self.emcee_run_method = emcee_run_method
 
         # Variables for the adaptive fitting method
-        max_steps = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='mcmc',
-                                 key='max_steps',
-                                 logger=self.logger,
-                                 )
+        max_steps = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="max_steps",
+            logger=self.logger,
+        )
         self.max_steps = max_steps
 
-        convergence_factor = get_dict_val(self.config,
-                                          self.config_defaults,
-                                          table='mcmc',
-                                          key='convergence_factor',
-                                          logger=self.logger,
-                                          )
+        convergence_factor = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="convergence_factor",
+            logger=self.logger,
+        )
         self.convergence_factor = convergence_factor
 
-        tau_change = get_dict_val(self.config,
-                                  self.config_defaults,
-                                  table='mcmc',
-                                  key='tau_change',
-                                  logger=self.logger,
-                                  )
+        tau_change = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="tau_change",
+            logger=self.logger,
+        )
         self.tau_change = tau_change
 
-        thin = get_dict_val(self.config,
-                            self.config_defaults,
-                            table='mcmc',
-                            key='thin',
-                            logger=self.logger,
-                            )
+        thin = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="thin",
+            logger=self.logger,
+        )
         self.thin = thin
 
-        burn_in = get_dict_val(self.config,
-                               self.config_defaults,
-                               table='mcmc',
-                               key='burn_in',
-                               logger=self.logger,
-                               )
+        burn_in = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="burn_in",
+            logger=self.logger,
+        )
         self.burn_in = burn_in
 
         # Variables for fixed fitting method
-        n_steps = get_dict_val(self.config,
-                               self.config_defaults,
-                               table='mcmc',
-                               key='n_steps',
-                               logger=self.logger,
-                               )
+        n_steps = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="n_steps",
+            logger=self.logger,
+        )
         self.n_steps = n_steps
 
-        n_walkers = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='mcmc',
-                                 key='n_walkers',
-                                 logger=self.logger,
-                                 )
+        n_walkers = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="n_walkers",
+            logger=self.logger,
+        )
         self.n_walkers = n_walkers
 
-        n_cores = get_dict_val(self.local,
-                               self.local_defaults,
-                               table='local',
-                               key='n_cores',
-                               logger=self.logger,
-                               )
+        n_cores = get_dict_val(
+            self.local,
+            self.local_defaults,
+            table="local",
+            key="n_cores",
+            logger=self.logger,
+        )
 
-        if n_cores == '':
+        if n_cores == "":
             self.n_cores = mp.cpu_count()
         else:
             self.n_cores = n_cores
 
-        if self.fit_type == 'lte':
+        if self.fit_type == "lte":
             self.props = [
-                'tex',
-                'tau',
-                'v',
-                'sigma',
+                "tex",
+                "tau",
+                "v",
+                "sigma",
             ]
             self.labels = [
-                r'$T_\mathrm{ex}$ (%s)',
-                r'$\log(\tau)$ (%s)',
-                r'$v$ (%s)',
-                r'$\sigma$ (%s)',
+                r"$T_\mathrm{ex}$ (%s)",
+                r"$\log(\tau)$ (%s)",
+                r"$v$ (%s)",
+                r"$\sigma$ (%s)",
             ]
 
-        elif self.fit_type == 'pure_gauss':
+        elif self.fit_type == "pure_gauss":
             self.props = [
-                't',
-                'v',
-                'sigma',
+                "t",
+                "v",
+                "sigma",
             ]
             self.labels = [
-                r'$T$ (%s)',
-                r'$v$ (%s)',
-                r'$\sigma$ (%s)',
+                r"$T$ (%s)",
+                r"$v$ (%s)",
+                r"$\sigma$ (%s)",
             ]
 
-        elif self.fit_type == 'radex':
+        elif self.fit_type == "radex":
             self.props = [
-                't_kin',
-                'N_col',
-                'n_h2',
-                'v',
-                'sigma',
+                "t_kin",
+                "N_col",
+                "n_h2",
+                "v",
+                "sigma",
             ]
             self.labels = [
-                r'$T_\mathrm{kin}$ (%s)',
-                r'$N_\mathrm{col}$ (%s)',
-                r'$n_\mathrm{H2}$ (%s)',
-                r'$v$ (%s)',
-                r'$\sigma$ (%s)',
+                r"$T_\mathrm{kin}$ (%s)",
+                r"$N_\mathrm{col}$ (%s)",
+                r"$n_\mathrm{H2}$ (%s)",
+                r"$v$ (%s)",
+                r"$\sigma$ (%s)",
             ]
         else:
-            self.logger.warning('fit_type %s not known' % self.fit_type)
+            self.logger.warning(f"fit_type {self.fit_type} not known")
             sys.exit()
 
         self.parameter_maps = None
         self.max_n_comp = None
 
-    def generate_radex_grid(self,
-                            output_file=None,
-                            ):
+    def generate_radex_grid(
+        self,
+        output_file=None,
+    ):
         """Pre-generate RADEX grid, given various bounds and steps
 
         This will be the grid we interpolate over for speed later. As such,
@@ -1083,89 +1201,100 @@ class HyperfineFitter:
 
         """
 
-        if self.fit_type != 'radex':
-            self.logger.warning('fit_type should be radex')
+        if self.fit_type != "radex":
+            self.logger.warning("fit_type should be radex")
             sys.exit()
 
         if output_file is None:
-            output_file = get_dict_val(self.config,
-                                       self.config_defaults,
-                                       table='generate_radex_grid',
-                                       key='output_file',
-                                       logger=self.logger,
-                                       )
+            output_file = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="generate_radex_grid",
+                key="output_file",
+                logger=self.logger,
+            )
 
-        t_kin = get_dict_val(self.config,
-                             self.config_defaults,
-                             table='generate_radex_grid',
-                             key='t_kin',
-                             logger=self.logger,
-                             )
-        n_mol = get_dict_val(self.config,
-                             self.config_defaults,
-                             table='generate_radex_grid',
-                             key='n_mol',
-                             logger=self.logger,
-                             )
-        n_h2 = get_dict_val(self.config,
-                            self.config_defaults,
-                            table='generate_radex_grid',
-                            key='n_h2',
-                            logger=self.logger,
-                            )
-        dv = get_dict_val(self.config,
-                          self.config_defaults,
-                          table='generate_radex_grid',
-                          key='dv',
-                          logger=self.logger,
-                          )
+        t_kin = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="t_kin",
+            logger=self.logger,
+        )
+        n_mol = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="n_mol",
+            logger=self.logger,
+        )
+        n_h2 = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="n_h2",
+            logger=self.logger,
+        )
+        dv = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="dv",
+            logger=self.logger,
+        )
 
-        if t_kin == '':
+        if t_kin == "":
             t_kin = self.bounds[0]
-        if n_mol == '':
+        if n_mol == "":
             n_mol = self.bounds[1]
-        if n_h2 == '':
+        if n_h2 == "":
             n_h2 = self.bounds[2]
-        if dv == '':
+        if dv == "":
             dv = self.bounds[4]
 
-        t_kin_step = get_dict_val(self.config,
-                                  self.config_defaults,
-                                  table='generate_radex_grid',
-                                  key='t_kin_step',
-                                  logger=self.logger,
-                                  )
-        n_mol_step = get_dict_val(self.config,
-                                  self.config_defaults,
-                                  table='generate_radex_grid',
-                                  key='n_mol_step',
-                                  logger=self.logger,
-                                  )
-        n_h2_step = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='generate_radex_grid',
-                                 key='n_h2_step',
-                                 logger=self.logger,
-                                 )
-        dv_step = get_dict_val(self.config,
-                               self.config_defaults,
-                               table='generate_radex_grid',
-                               key='dv_step',
-                               logger=self.logger,
-                               )
+        t_kin_step = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="t_kin_step",
+            logger=self.logger,
+        )
+        n_mol_step = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="n_mol_step",
+            logger=self.logger,
+        )
+        n_h2_step = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="n_h2_step",
+            logger=self.logger,
+        )
+        dv_step = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="dv_step",
+            logger=self.logger,
+        )
 
-        geom = get_dict_val(self.config,
-                            self.config_defaults,
-                            table='generate_radex_grid',
-                            key='geom',
-                            logger=self.logger,
-                            )
-        progress = get_dict_val(self.config,
-                                self.config_defaults,
-                                table='generate_radex_grid',
-                                key='progress',
-                                logger=self.logger,
-                                )
+        geom = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="geom",
+            logger=self.logger,
+        )
+        progress = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="generate_radex_grid",
+            key="progress",
+            logger=self.logger,
+        )
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
@@ -1175,19 +1304,22 @@ class HyperfineFitter:
             t_kin_array = np.arange(t_kin[0], t_kin[1] + t_kin_step, t_kin_step)
             n_mol_array = np.arange(n_mol[0], n_mol[1] + n_mol_step, n_mol_step)
             n_h2_array = np.arange(n_h2[0], n_h2[1] + n_h2_step, n_h2_step)
-            dv_array = np.arange(dv[0], dv[1] + dv_step, dv_step) * 2.355  # 2.355 since distinction between sigma/dv
+            dv_array = (
+                np.arange(dv[0], dv[1] + dv_step, dv_step) * 2.355
+            )  # 2.355 since distinction between sigma/dv
 
-            ds = ndradex.run(self.radex_datafile,
-                             self.transitions,
-                             T_kin=t_kin_array,
-                             N_mol=10 ** n_mol_array,
-                             n_H2=10 ** n_h2_array,
-                             dv=dv_array,
-                             T_bg=T_BACKGROUND,
-                             geom=geom,
-                             progress=progress,
-                             n_procs=self.n_cores,
-                             )
+            ds = ndradex.run(
+                self.radex_datafile,
+                self.transitions,
+                T_kin=t_kin_array,
+                N_mol=10**n_mol_array,
+                n_H2=10**n_h2_array,
+                dv=dv_array,
+                T_bg=T_BACKGROUND,
+                geom=geom,
+                progress=progress,
+                n_procs=self.n_cores,
+            )
 
             ndradex.save_dataset(ds, output_file)
 
@@ -1198,11 +1330,12 @@ class HyperfineFitter:
         global radex_grid
         radex_grid = ds
 
-    def multicomponent_fitter(self,
-                              fit_dict_filename=None,
-                              n_comp_filename=None,
-                              likelihood_filename=None,
-                              ):
+    def multicomponent_fitter(
+        self,
+        fit_dict_filename=None,
+        n_comp_filename=None,
+        likelihood_filename=None,
+    ):
         """Run the multicomponent fitter
 
         This runs everything, essentially, and is the part that you
@@ -1222,108 +1355,128 @@ class HyperfineFitter:
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
 
-        self.logger.info('Starting multi-component fitting')
+        self.logger.info("Starting multi-component fitting")
 
         if fit_dict_filename is None:
-            fit_dict_filename = get_dict_val(self.config,
-                                             self.config_defaults,
-                                             table='multicomponent_fitter',
-                                             key='fit_dict_filename',
-                                             logger=self.logger,
-                                             )
+            fit_dict_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="fit_dict_filename",
+                logger=self.logger,
+            )
 
-        chunksize = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='multicomponent_fitter',
-                                 key='chunksize',
-                                 logger=self.logger,
-                                 )
+        chunksize = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="multicomponent_fitter",
+            key="chunksize",
+            logger=self.logger,
+        )
 
-        progress = get_dict_val(self.config,
-                                self.config_defaults,
-                                table='multicomponent_fitter',
-                                key='progress',
-                                logger=self.logger,
-                                )
+        progress = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="multicomponent_fitter",
+            key="progress",
+            logger=self.logger,
+        )
 
-        save = get_dict_val(self.config,
-                            self.config_defaults,
-                            table='multicomponent_fitter',
-                            key='save',
-                            logger=self.logger,
-                            )
+        save = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="multicomponent_fitter",
+            key="save",
+            logger=self.logger,
+        )
 
-        if self.data_type == 'spectrum':
+        if self.data_type == "spectrum":
 
-            if not os.path.exists(fit_dict_filename + '.pkl') or overwrite:
+            if not os.path.exists(f"{fit_dict_filename}.pkl") or overwrite:
                 data = self.data
                 error = self.error
 
-                n_comp, likelihood, sampler, cov_matrix, cov_med = self.delta_bic_looper(data,
-                                                                                         error,
-                                                                                         progress=progress,
-                                                                                         )
+                n_comp, likelihood, sampler, cov_matrix, cov_med = (
+                    self.delta_bic_looper(
+                        data,
+                        error,
+                        progress=progress,
+                    )
+                )
                 if save:
 
-                    fit_dict = {"n_comp": n_comp,
-                                "likelihood": likelihood,
-                                }
+                    fit_dict = {
+                        "n_comp": n_comp,
+                        "likelihood": likelihood,
+                        "sampler": None,
+                        "cov": {},
+                    }
                     if self.keep_sampler:
                         fit_dict["sampler"] = sampler
+                    else:
+                        fit_dict.pop("sampler")
+
                     if self.keep_covariance:
                         fit_dict["cov"] = {
                             "matrix": cov_matrix,
                             "med": cov_med,
                         }
+                    else:
+                        fit_dict.pop("cov")
 
-                    save_fit_dict(fit_dict, fit_dict_filename + '.pkl')
+                    save_fit_dict(fit_dict, f"{fit_dict_filename}.pkl")
 
-        elif self.data_type == 'cube':
+        elif self.data_type == "cube":
 
             if n_comp_filename is None:
-                n_comp_filename = get_dict_val(self.config,
-                                               self.config_defaults,
-                                               table='multicomponent_fitter',
-                                               key='n_comp_filename',
-                                               logger=self.logger,
-                                               )
+                n_comp_filename = get_dict_val(
+                    self.config,
+                    self.config_defaults,
+                    table="multicomponent_fitter",
+                    key="n_comp_filename",
+                    logger=self.logger,
+                )
             if likelihood_filename is None:
-                likelihood_filename = get_dict_val(self.config,
-                                                   self.config_defaults,
-                                                   table='multicomponent_fitter',
-                                                   key='likelihood_filename',
-                                                   logger=self.logger,
-                                                   )
+                likelihood_filename = get_dict_val(
+                    self.config,
+                    self.config_defaults,
+                    table="multicomponent_fitter",
+                    key="likelihood_filename",
+                    logger=self.logger,
+                )
 
-            if not os.path.exists(n_comp_filename + '.npy') or overwrite:
+            if not os.path.exists(f"{n_comp_filename}.npy") or overwrite:
                 n_comp = np.zeros([self.data.shape[1], self.data.shape[2]])
             else:
-                n_comp = np.load(n_comp_filename + '.npy')
-            if not os.path.exists(likelihood_filename + '.npy') or overwrite:
+                n_comp = np.load(f"{n_comp_filename}.npy")
+            if not os.path.exists(f"{likelihood_filename}.npy") or overwrite:
                 likelihood = np.zeros_like(n_comp)
             else:
-                likelihood = np.load(likelihood_filename + '.npy')
+                likelihood = np.load(f"{likelihood_filename}.npy")
 
-            ij_list = [(i, j)
-                       for i in range(self.data.shape[1])
-                       for j in range(self.data.shape[2])
-                       if self.mask[i, j] != 0
-                       ]
+            ij_list = [
+                (i, j)
+                for i in range(self.data.shape[1])
+                for j in range(self.data.shape[2])
+                if self.mask[i, j] != 0
+            ]
 
-            self.logger.info('Fitting using %d cores' % self.n_cores)
+            self.logger.info(f"Fitting using {self.n_cores} cores")
 
             with mp.Pool(self.n_cores) as pool:
                 map_result = list(
                     tqdm(
                         pool.imap(
-                            partial(self.parallel_fitting,
-                                    fit_dict_filename=fit_dict_filename,
-                                    save=save,
-                                    overwrite=overwrite),
+                            partial(
+                                self.parallel_fitting,
+                                fit_dict_filename=fit_dict_filename,
+                                save=save,
+                                overwrite=overwrite,
+                            ),
                             ij_list,
                             chunksize=chunksize,
                         ),
-                        total=len(ij_list)
+                        total=len(ij_list),
                     )
                 )
 
@@ -1332,15 +1485,16 @@ class HyperfineFitter:
                 likelihood[ij[0], ij[1]] = map_result[idx][1]
 
             if save:
-                np.save(n_comp_filename + '.npy', n_comp)
-                np.save(likelihood_filename + '.npy', likelihood)
+                np.save(f"{n_comp_filename}.npy", n_comp)
+                np.save(f"{likelihood_filename}.npy", likelihood)
 
-    def parallel_fitting(self,
-                         ij,
-                         fit_dict_filename='fit_dict',
-                         save=True,
-                         overwrite=False,
-                         ):
+    def parallel_fitting(
+        self,
+        ij,
+        fit_dict_filename="fit_dict",
+        save=True,
+        overwrite=False,
+    ):
         """Parallel function for MCMC fitting.
 
         Wraps up the MCMC fitting to pass off to multiple cores. Because of overheads, it's easier to farm out multiple
@@ -1361,52 +1515,64 @@ class HyperfineFitter:
         i = ij[0]
         j = ij[1]
 
-        cube_fit_dict_filename = fit_dict_filename + '_%s_%s' % (i, j)
+        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}"
 
-        if not os.path.exists(cube_fit_dict_filename + '.pkl') or overwrite:
-            self.logger.debug('Fitting %s, %s' % (i, j))
+        if not os.path.exists(f"{cube_fit_dict_filename}.pkl") or overwrite:
+            self.logger.debug(f"Fitting {i}, {j}")
             data = self.data[:, i, j]
             error = self.error[:, i, j]
 
             # Limit to a single core to avoid weirdness
             with threadpool_limits(limits=1, user_api=None):
-                n_comp, likelihood, sampler, cov_matrix, cov_med = self.delta_bic_looper(data=data,
-                                                                                         error=error,
-                                                                                         )
+                n_comp, likelihood, sampler, cov_matrix, cov_med = (
+                    self.delta_bic_looper(
+                        data=data,
+                        error=error,
+                    )
+                )
 
             if save:
 
-                fit_dict = {"n_comp": n_comp,
-                            "likelihood": likelihood,
-                            }
+                fit_dict = {
+                    "n_comp": n_comp,
+                    "likelihood": likelihood,
+                    "sampler": None,
+                    "cov": {},
+                }
                 if self.keep_sampler:
                     fit_dict["sampler"] = sampler
+                else:
+                    fit_dict.pop("sampler")
+
                 if self.keep_covariance:
                     fit_dict["cov"] = {
                         "matrix": cov_matrix,
                         "med": cov_med,
                     }
+                else:
+                    fit_dict.pop("cov")
 
-                save_fit_dict(fit_dict, cube_fit_dict_filename + '.pkl')
+                save_fit_dict(fit_dict, f"{cube_fit_dict_filename}.pkl")
 
         else:
 
-            fit_dict = load_fit_dict(cube_fit_dict_filename + '.pkl')
+            fit_dict = load_fit_dict(f"{cube_fit_dict_filename}.pkl")
 
-            n_comp = fit_dict['n_comp']
-            likelihood = fit_dict['likelihood']
+            n_comp = fit_dict["n_comp"]
+            likelihood = fit_dict["likelihood"]
 
-        self.logger.debug('N components: %d, likelihood: %.2f' % (n_comp, likelihood))
+        self.logger.debug(f"N components: {n_comp}, likelihood: {likelihood:.2f}")
 
         return n_comp, likelihood
 
-    def delta_bic_looper(self,
-                         data,
-                         error,
-                         save=False,
-                         overwrite=True,
-                         progress=False,
-                         ):
+    def delta_bic_looper(
+        self,
+        data,
+        error,
+        save=False,
+        overwrite=True,
+        progress=False,
+    ):
         """Increase spectral complexity until we hit diminishing returns
 
         This will iteratively build up the spectral model one component
@@ -1431,21 +1597,24 @@ class HyperfineFitter:
         sampler_old = None
         likelihood_old = None
         sampler = None
+        cov_matrix = None
+        cov_med = None
         n_comp = 0
         prop_len = len(self.props)
         ln_m = np.log(len(data[~np.isnan(data)]))
-        likelihood = ln_like(theta=0,
-                             intensity=data,
-                             intensity_err=error,
-                             vel=self.vel,
-                             strength_lines=self.strength_lines,
-                             v_lines=self.v_lines,
-                             props=self.props,
-                             n_comp=n_comp,
-                             fit_type=self.fit_type,
-                             )
-        bic = - 2 * likelihood
-        aic = - 2 * likelihood
+        likelihood = ln_like(
+            theta=0,
+            intensity=data,
+            intensity_err=error,
+            vel=self.vel,
+            strength_lines=self.strength_lines,
+            v_lines=self.v_lines,
+            props=self.props,
+            n_comp=n_comp,
+            fit_type=self.fit_type,
+        )
+        bic = -2 * likelihood
+        aic = -2 * likelihood
 
         while delta_bic > self.delta_bic_cutoff or delta_aic > self.delta_aic_cutoff:
             # Store the previous BIC and sampler, since we need them later
@@ -1458,30 +1627,33 @@ class HyperfineFitter:
             n_comp += 1
             k = n_comp * prop_len
             with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                sampler = self.run_mcmc(data,
-                                        error,
-                                        n_comp=n_comp,
-                                        save=save,
-                                        overwrite=overwrite,
-                                        progress=progress,
-                                        )
+                warnings.simplefilter("ignore")
+                sampler = self.run_mcmc(
+                    data,
+                    error,
+                    n_comp=n_comp,
+                    save=save,
+                    overwrite=overwrite,
+                    progress=progress,
+                )
 
             # Calculate max likelihood parameters and BIC
             flat_samples = self.get_samples(sampler)
-            parameter_median = np.nanmedian(flat_samples,
-                                            axis=0,
-                                            )
-            likelihood = ln_like(theta=parameter_median,
-                                 intensity=data,
-                                 intensity_err=error,
-                                 vel=self.vel,
-                                 strength_lines=self.strength_lines,
-                                 v_lines=self.v_lines,
-                                 props=self.props,
-                                 n_comp=n_comp,
-                                 fit_type=self.fit_type,
-                                 )
+            parameter_median = np.nanmedian(
+                flat_samples,
+                axis=0,
+            )
+            likelihood = ln_like(
+                theta=parameter_median,
+                intensity=data,
+                intensity_err=error,
+                vel=self.vel,
+                strength_lines=self.strength_lines,
+                v_lines=self.v_lines,
+                props=self.props,
+                n_comp=n_comp,
+                fit_type=self.fit_type,
+            )
 
             # Calculate BIC and AIC
             bic = k * ln_m - 2 * likelihood
@@ -1501,40 +1673,56 @@ class HyperfineFitter:
 
             for i in range(max_back_loops):
                 flat_samples = self.get_samples(sampler)
-                parameter_median = np.nanmedian(flat_samples,
-                                                axis=0,
-                                                )
+                parameter_median = np.nanmedian(
+                    flat_samples,
+                    axis=0,
+                )
 
-                if self.fit_type == 'lte':
+                if self.fit_type == "lte":
                     line_intensities = np.array(
-                        [hyperfine_structure_lte(*parameter_median[prop_len * i: prop_len * i + prop_len],
-                                                 strength_lines=self.strength_lines,
-                                                 v_lines=self.v_lines,
-                                                 vel=self.vel,
-                                                 )
-                         for i in range(n_comp)]
+                        [
+                            hyperfine_structure_lte(
+                                *parameter_median[
+                                    prop_len * i : prop_len * i + prop_len
+                                ],
+                                strength_lines=self.strength_lines,
+                                v_lines=self.v_lines,
+                                vel=self.vel,
+                            )
+                            for i in range(n_comp)
+                        ]
                     )
 
-                elif self.fit_type == 'pure_gauss':
+                elif self.fit_type == "pure_gauss":
                     line_intensities = np.array(
-                        [hyperfine_structure_pure_gauss(*parameter_median[prop_len * i: prop_len * i + prop_len],
-                                                        strength_lines=self.strength_lines,
-                                                        v_lines=self.v_lines,
-                                                        vel=self.vel,
-                                                        )
-                         for i in range(n_comp)]
+                        [
+                            hyperfine_structure_pure_gauss(
+                                *parameter_median[
+                                    prop_len * i : prop_len * i + prop_len
+                                ],
+                                strength_lines=self.strength_lines,
+                                v_lines=self.v_lines,
+                                vel=self.vel,
+                            )
+                            for i in range(n_comp)
+                        ]
                     )
 
-                elif self.fit_type == 'radex':
+                elif self.fit_type == "radex":
                     line_intensities = np.array(
-                        [hyperfine_structure_radex(*parameter_median[prop_len * i: prop_len * i + prop_len],
-                                                   v_lines=self.v_lines,
-                                                   vel=self.vel,
-                                                   )
-                         for i in range(n_comp)]
+                        [
+                            hyperfine_structure_radex(
+                                *parameter_median[
+                                    prop_len * i : prop_len * i + prop_len
+                                ],
+                                v_lines=self.v_lines,
+                                vel=self.vel,
+                            )
+                            for i in range(n_comp)
+                        ]
                     )
                 else:
-                    self.logger.warning('Fit type %s not understood!' % self.fit_type)
+                    self.logger.warning(f"Fit type {self.fit_type} not understood!")
                     sys.exit()
 
                 integrated_intensities = np.trapz(line_intensities, x=self.vel, axis=-1)
@@ -1549,44 +1737,51 @@ class HyperfineFitter:
                 n_comp -= 1
 
                 if n_comp == 0:
-                    likelihood = ln_like(theta=0,
-                                         intensity=data,
-                                         intensity_err=error,
-                                         vel=self.vel,
-                                         strength_lines=self.strength_lines,
-                                         v_lines=self.v_lines,
-                                         props=self.props,
-                                         n_comp=n_comp,
-                                         fit_type=self.fit_type)
-                    bic = - 2 * likelihood
+                    likelihood = ln_like(
+                        theta=0,
+                        intensity=data,
+                        intensity_err=error,
+                        vel=self.vel,
+                        strength_lines=self.strength_lines,
+                        v_lines=self.v_lines,
+                        props=self.props,
+                        n_comp=n_comp,
+                        fit_type=self.fit_type,
+                    )
+                    bic = -2 * likelihood
                 else:
                     k = n_comp * prop_len
-                    idx_to_delete = range(prop_len * component_order[0], prop_len * component_order[0] + prop_len)
+                    idx_to_delete = range(
+                        prop_len * component_order[0],
+                        prop_len * component_order[0] + prop_len,
+                    )
                     p0 = np.delete(parameter_median, idx_to_delete)
                     with warnings.catch_warnings():
-                        warnings.simplefilter('ignore')
-                        sampler = self.run_mcmc(data,
-                                                error,
-                                                n_comp=n_comp,
-                                                save=save,
-                                                overwrite=overwrite,
-                                                progress=progress,
-                                                p0_fit=p0,
-                                                )
+                        warnings.simplefilter("ignore")
+                        sampler = self.run_mcmc(
+                            data,
+                            error,
+                            n_comp=n_comp,
+                            save=save,
+                            overwrite=overwrite,
+                            progress=progress,
+                            p0_fit=p0,
+                        )
 
                     # Calculate max likelihood parameters and BIC
                     flat_samples = self.get_samples(sampler)
                     parameter_median = np.nanmedian(flat_samples, axis=0)
-                    likelihood = ln_like(theta=parameter_median,
-                                         intensity=data,
-                                         intensity_err=error,
-                                         vel=self.vel,
-                                         strength_lines=self.strength_lines,
-                                         v_lines=self.v_lines,
-                                         props=self.props,
-                                         n_comp=n_comp,
-                                         fit_type=self.fit_type,
-                                         )
+                    likelihood = ln_like(
+                        theta=parameter_median,
+                        intensity=data,
+                        intensity_err=error,
+                        vel=self.vel,
+                        strength_lines=self.strength_lines,
+                        v_lines=self.v_lines,
+                        props=self.props,
+                        n_comp=n_comp,
+                        fit_type=self.fit_type,
+                    )
                     bic = k * ln_m - 2 * likelihood
                     aic = 2 * k - 2 * likelihood
 
@@ -1594,30 +1789,36 @@ class HyperfineFitter:
                 delta_aic = aic_old - aic
 
                 # If removing and refitting doesn't significantly improve things, then just jump out of here
-                if delta_bic < self.delta_bic_cutoff and delta_aic < self.delta_aic_cutoff:
+                if (
+                    delta_bic < self.delta_bic_cutoff
+                    and delta_aic < self.delta_aic_cutoff
+                ):
                     break
 
             sampler = sampler_old
             likelihood = likelihood_old
             n_comp += 1
 
-        # Finally, calculate the covariance matrix and the parameter medians
-        samples = self.get_samples(sampler)
-        cov_matrix = np.cov(samples.T)
-        cov_med = np.median(samples, axis=0)
+        # Finally, calculate the covariance matrix and the parameter medians.
+        # This is only defined if we end up with a 0-component fit
+        if sampler is not None:
+            samples = self.get_samples(sampler)
+            cov_matrix = np.cov(samples.T)
+            cov_med = np.median(samples, axis=0)
 
         return n_comp, likelihood, sampler, cov_matrix, cov_med
 
-    def run_mcmc(self,
-                 data,
-                 error,
-                 n_comp=1,
-                 save=True,
-                 overwrite=False,
-                 progress=False,
-                 fit_dict_filename='fit_dict.pkl',
-                 p0_fit=None,
-                 ):
+    def run_mcmc(
+        self,
+        data,
+        error,
+        n_comp=1,
+        save=True,
+        overwrite=False,
+        progress=False,
+        fit_dict_filename="fit_dict.pkl",
+        p0_fit=None,
+    ):
         """Run emcee to get a fit out
 
         Args:
@@ -1640,15 +1841,15 @@ class HyperfineFitter:
 
             if p0_fit is None:
 
-                vel_idx = np.where(np.array(self.props) == 'v')[0][0]
+                vel_idx = np.where(np.array(self.props) == "v")[0][0]
 
                 # Pull in any relevant kwargs
                 kwargs = {}
 
                 for config_dict in [self.config_defaults, self.config]:
-                    if 'lmfit' in config_dict:
-                        for key in config_dict['lmfit']:
-                            kwargs[key] = config_dict['lmfit'][key]
+                    if "lmfit" in config_dict:
+                        for key in config_dict["lmfit"]:
+                            kwargs[key] = config_dict["lmfit"][key]
 
                 # We have a default here set to add minimizer_kwargs,
                 # which will crash for minimizers that don't support this
@@ -1658,14 +1859,16 @@ class HyperfineFitter:
                     "shgo",
                 ]
 
-                if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
+                if (
+                    kwargs.get("method", "leastsq")
+                    not in minimizers_with_minimizer_kwargs
+                ):
                     kwargs.pop("minimizer_kwargs", None)
 
                 # Find any NaNs in data or error maps
-                good_idx = np.where(np.logical_and(np.isfinite(data),
-                                                   np.isfinite(error)
-                                                   )
-                                    )
+                good_idx = np.where(
+                    np.logical_and(np.isfinite(data), np.isfinite(error))
+                )
 
                 # And the velocity resolution
                 dv = np.abs(np.nanmedian(np.diff(self.vel)))
@@ -1685,31 +1888,35 @@ class HyperfineFitter:
                     p0_idx = 0
                     for i in range(n_comp):
                         for j in range(prop_len):
-                            params.add('%s_%d' % (self.props[j], i),
-                                       value=p0[p0_idx],
-                                       min=bounds[j][0],
-                                       max=bounds[j][1],
-                                       )
+                            params.add(
+                                f"{self.props[j]}_{i}",
+                                value=p0[p0_idx],
+                                min=bounds[j][0],
+                                max=bounds[j][1],
+                            )
                             p0_idx += 1
 
                     # Use lmfit to get an initial fit
                     lmfit_result = minimize(
                         fcn=initial_lmfit,
                         params=params,
-                        args=(data[good_idx],
-                              error[good_idx],
-                              self.vel[good_idx],
-                              self.strength_lines,
-                              self.v_lines,
-                              self.props,
-                              n_comp,
-                              self.fit_type,
-                              True,
-                              ),
+                        args=(
+                            data[good_idx],
+                            error[good_idx],
+                            self.vel[good_idx],
+                            self.strength_lines,
+                            self.v_lines,
+                            self.props,
+                            n_comp,
+                            self.fit_type,
+                            True,
+                        ),
                         **kwargs,
                     )
 
-                    p0_fit = np.array([lmfit_result.params[key].value for key in lmfit_result.params])
+                    p0_fit = np.array(
+                        [lmfit_result.params[key].value for key in lmfit_result.params]
+                    )
 
                 # Get an initial guess for the velocities via an iterative method
                 elif self.lmfit_method == "iterative":
@@ -1728,26 +1935,34 @@ class HyperfineFitter:
                     nan_idx = ~np.isfinite(data_interp)
                     x = np.arange(len(data_interp))
 
-                    data_interp[nan_idx] = np.interp(x[nan_idx],
-                                                     x[~nan_idx],
-                                                     data_interp[~nan_idx],
-                                                     )
+                    data_interp[nan_idx] = np.interp(
+                        x[nan_idx],
+                        x[~nan_idx],
+                        data_interp[~nan_idx],
+                    )
 
                     for comp in range(n_comp):
 
                         it_data = data_interp - it_model
 
                         # Find lines. We impose no flux cut here
-                        spec = Spectrum(flux=it_data * u.K, spectral_axis=self.vel * u.km / u.s)
+                        spec = Spectrum(
+                            flux=it_data * u.K, spectral_axis=self.vel * u.km / u.s
+                        )
                         found_lines = find_lines_derivative(spec)
 
                         # Only take emission lines
-                        found_lines = found_lines[found_lines["line_type"] == "emission"]
+                        found_lines = found_lines[
+                            found_lines["line_type"] == "emission"
+                        ]
 
                         # Now take these lines and order by flux
-                        found_line_fluxes = np.array([float(it_data[x])
-                                                      for x in found_lines["line_center_index"]]
-                                                     )
+                        found_line_fluxes = np.array(
+                            [
+                                float(it_data[x])
+                                for x in found_lines["line_center_index"]
+                            ]
+                        )
                         found_line_vels = found_lines["line_center"].value
 
                         # Sort from brightest to faintest, pick the brightest component
@@ -1767,62 +1982,72 @@ class HyperfineFitter:
                             b_min = copy.deepcopy(bounds[j][0])
                             b_max = copy.deepcopy(bounds[j][1])
 
-                            params.add(f"{self.props[j]}_{comp}",
-                                       value=p0[j],
-                                       min=b_min,
-                                       max=b_max,
-                                       )
+                            params.add(
+                                f"{self.props[j]}_{comp}",
+                                value=p0[j],
+                                min=b_min,
+                                max=b_max,
+                            )
 
                         # Get a fit to the actual data
                         lmfit_result = minimize(
                             fcn=initial_lmfit,
                             params=params,
-                            args=(data[good_idx],
-                                  error[good_idx],
-                                  self.vel[good_idx],
-                                  self.strength_lines,
-                                  self.v_lines,
-                                  self.props,
-                                  comp + 1,
-                                  self.fit_type,
-                                  True,
-                                  ),
+                            args=(
+                                data[good_idx],
+                                error[good_idx],
+                                self.vel[good_idx],
+                                self.strength_lines,
+                                self.v_lines,
+                                self.props,
+                                comp + 1,
+                                self.fit_type,
+                                True,
+                            ),
                             **kwargs,
                         )
 
-                        p0_fit = np.array([lmfit_result.params[key].value for key in lmfit_result.params])
+                        p0_fit = np.array(
+                            [
+                                lmfit_result.params[key].value
+                                for key in lmfit_result.params
+                            ]
+                        )
 
-                        it_model = multiple_components(p0_fit,
-                                                       vel=self.vel,
-                                                       strength_lines=self.strength_lines,
-                                                       v_lines=self.v_lines,
-                                                       props=self.props,
-                                                       n_comp=comp + 1,
-                                                       fit_type=self.fit_type,
-                                                       log_tau=True,
-                                                       )
+                        it_model = multiple_components(
+                            p0_fit,
+                            vel=self.vel,
+                            strength_lines=self.strength_lines,
+                            v_lines=self.v_lines,
+                            props=self.props,
+                            n_comp=comp + 1,
+                            fit_type=self.fit_type,
+                            log_tau=True,
+                        )
 
                 else:
 
-                    raise ValueError(f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}")
+                    raise ValueError(
+                        f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}"
+                    )
 
                 # Sort p0 so it has monotonically increasing velocities
                 v0_values = np.array(
                     [p0_fit[prop_len * i + vel_idx] for i in range(n_comp)]
                 )
                 v0_sort = v0_values.argsort()
-                p0_fit_sort = [p0_fit[prop_len * i: prop_len * i + prop_len]
-                               for i in v0_sort]
-                p0_fit = [item
-                          for sublist in p0_fit_sort
-                          for item in sublist]
+                p0_fit_sort = [
+                    p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort
+                ]
+                p0_fit = [item for sublist in p0_fit_sort for item in sublist]
 
             n_dims = len(p0_fit)
 
             # Shuffle the parameters around a little. For values very close to 0, don't base this on the value itself
-            p0_movement = np.max(np.array([0.01 * np.abs(p0_fit), 0.01 * np.ones_like(p0_fit)]),
-                                 axis=0,
-                                 )
+            p0_movement = np.max(
+                np.array([0.01 * np.abs(p0_fit), 0.01 * np.ones_like(p0_fit)]),
+                axis=0,
+            )
 
             # If we have an adaptive number of walkers, account for that here
             if isinstance(self.n_walkers, str):
@@ -1834,75 +2059,80 @@ class HyperfineFitter:
 
             # Enforce positive values for t_ex, width for the LTE fitting
 
-            if self.fit_type == 'lte':
+            if self.fit_type == "lte":
                 positive_idx = [0, 3]
-            elif self.fit_type == 'pure_gauss':
+            elif self.fit_type == "pure_gauss":
                 positive_idx = [0, 2]
-            elif self.fit_type == 'radex':
+            elif self.fit_type == "radex":
                 positive_idx = [0, 1, 4]
             else:
-                self.logger.warning('Fit type %s not understood!' % self.fit_type)
+                self.logger.warning(f"Fit type {self.fit_type} not understood!")
                 sys.exit()
 
             prop_len = len(self.props)
 
-            enforced_positives = [[prop_len * i + j]
-                                  for i in range(n_comp)
-                                  for j in positive_idx]
-            enforced_positives = [item
-                                  for sublist in enforced_positives
-                                  for item in sublist]
+            enforced_positives = [
+                [prop_len * i + j] for i in range(n_comp) for j in positive_idx
+            ]
+            enforced_positives = [
+                item for sublist in enforced_positives for item in sublist
+            ]
 
             for i in enforced_positives:
                 pos[:, i] = np.abs(pos[:, i])
 
-            sampler = self.emcee_wrapper(data,
-                                         error,
-                                         pos=pos,
-                                         n_walkers=n_walkers,
-                                         n_dims=n_dims,
-                                         n_comp=n_comp,
-                                         progress=progress,
-                                         )
+            sampler = self.emcee_wrapper(
+                data,
+                error,
+                pos=pos,
+                n_walkers=n_walkers,
+                n_dims=n_dims,
+                n_comp=n_comp,
+                progress=progress,
+            )
 
             if save:
                 # Calculate max likelihood
                 flat_samples = self.get_samples(sampler)
-                parameter_median = np.nanmedian(flat_samples,
-                                                axis=0,
-                                                )
-                likelihood = ln_like(theta=parameter_median,
-                                     intensity=data,
-                                     intensity_err=error,
-                                     vel=self.vel,
-                                     strength_lines=self.strength_lines,
-                                     v_lines=self.v_lines,
-                                     props=self.props,
-                                     n_comp=n_comp,
-                                     fit_type=self.fit_type,
-                                     )
+                parameter_median = np.nanmedian(
+                    flat_samples,
+                    axis=0,
+                )
+                likelihood = ln_like(
+                    theta=parameter_median,
+                    intensity=data,
+                    intensity_err=error,
+                    vel=self.vel,
+                    strength_lines=self.strength_lines,
+                    v_lines=self.v_lines,
+                    props=self.props,
+                    n_comp=n_comp,
+                    fit_type=self.fit_type,
+                )
 
-                fit_dict = {'sampler': sampler,
-                            'n_comp': n_comp,
-                            'likelihood': likelihood,
-                            }
+                fit_dict = {
+                    "sampler": sampler,
+                    "n_comp": n_comp,
+                    "likelihood": likelihood,
+                }
 
                 save_fit_dict(fit_dict, fit_dict_filename)
         else:
             fit_dict = load_fit_dict(fit_dict_filename)
-            sampler = fit_dict['sampler']
+            sampler = fit_dict["sampler"]
 
         return sampler
 
-    def emcee_wrapper(self,
-                      data,
-                      error,
-                      pos,
-                      n_walkers,
-                      n_dims,
-                      n_comp=1,
-                      progress=False,
-                      ):
+    def emcee_wrapper(
+        self,
+        data,
+        error,
+        pos,
+        n_walkers,
+        n_dims,
+        n_comp=1,
+        progress=False,
+    ):
         """Light wrapper around emcee
 
         The runs the emcee part, with some custom moves
@@ -1920,44 +2150,49 @@ class HyperfineFitter:
                 Defaults to False
         """
 
-        if self.data_type == 'spectrum':
+        if self.data_type == "spectrum":
 
             # Multiprocess here for speed
 
             with mp.Pool(self.n_cores) as pool:
-                sampler = self.run_mcmc_sampler(data=data,
-                                                error=error,
-                                                pos=pos,
-                                                n_walkers=n_walkers,
-                                                n_dims=n_dims,
-                                                n_comp=n_comp,
-                                                progress=progress,
-                                                pool=pool,
-                                                )
+                sampler = self.run_mcmc_sampler(
+                    data=data,
+                    error=error,
+                    pos=pos,
+                    n_walkers=n_walkers,
+                    n_dims=n_dims,
+                    n_comp=n_comp,
+                    progress=progress,
+                    pool=pool,
+                )
 
         else:
 
             # Run in serial since the cube is multiprocessing already (no daemons here, not today satan)
-            sampler = self.run_mcmc_sampler(data=data,
-                                            error=error,
-                                            pos=pos,
-                                            n_dims=n_dims,
-                                            n_comp=n_comp,
-                                            progress=progress,
-                                            )
+            sampler = self.run_mcmc_sampler(
+                data=data,
+                error=error,
+                pos=pos,
+                n_walkers=n_walkers,
+                n_dims=n_dims,
+                n_comp=n_comp,
+                progress=progress,
+            )
 
         return sampler
 
-    def get_samples(self,
-                    sampler,
-                    ):
+    def get_samples(
+        self,
+        sampler,
+    ):
         """Get samples from an emcee sampler"""
 
         # If we're fixed, then discard half the steps
         if self.emcee_run_method == "fixed":
-            samples = sampler.get_chain(discard=self.n_steps // 2,
-                                        flat=True,
-                                        )
+            samples = sampler.get_chain(
+                discard=self.n_steps // 2,
+                flat=True,
+            )
 
         # If we're adaptive, use parameters provided as a function
         # of the autocorrelation length
@@ -1967,26 +2202,30 @@ class HyperfineFitter:
             burn_in = int(self.burn_in * np.max(tau))
             thin = int(self.thin * np.min(tau))
 
-            samples = sampler.get_chain(discard=burn_in,
-                                        thin=thin,
-                                        flat=True,
-                                        )
+            samples = sampler.get_chain(
+                discard=burn_in,
+                thin=thin,
+                flat=True,
+            )
         else:
-            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
-                             f"not {self.emcee_run_method}")
+            raise ValueError(
+                f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
+                f"not {self.emcee_run_method}"
+            )
 
         return samples
 
-    def run_mcmc_sampler(self,
-                         data,
-                         error,
-                         pos,
-                         n_walkers,
-                         n_dims,
-                         n_comp=1,
-                         progress=False,
-                         pool=None,
-                         ):
+    def run_mcmc_sampler(
+        self,
+        data,
+        error,
+        pos,
+        n_walkers,
+        n_dims,
+        n_comp=1,
+        progress=False,
+        pool=None,
+    ):
         """Tool for actually running emcee
 
         There are two options here, fixed and adaptive which
@@ -2007,50 +2246,52 @@ class HyperfineFitter:
                 is the mp Pool
         """
 
-        sampler = emcee.EnsembleSampler(nwalkers=n_walkers,
-                                        ndim=n_dims,
-                                        log_prob_fn=ln_prob,
-                                        args=(
-                                            data,
-                                            error,
-                                            self.vel,
-                                            self.strength_lines,
-                                            self.v_lines,
-                                            self.props,
-                                            self.bounds,
-                                            n_comp,
-                                            self.fit_type,
-                                        ),
-                                        moves=[(emcee.moves.DEMove(), 0.8),
-                                               (emcee.moves.DESnookerMove(), 0.2)
-                                               ],
-                                        pool=pool,
-                                        )
+        sampler = emcee.EnsembleSampler(
+            nwalkers=n_walkers,
+            ndim=n_dims,
+            log_prob_fn=ln_prob,
+            args=(
+                data,
+                error,
+                self.vel,
+                self.strength_lines,
+                self.v_lines,
+                self.props,
+                self.bounds,
+                n_comp,
+                self.fit_type,
+            ),
+            moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
+            pool=pool,
+        )
 
         # Simple case where we have the fixed steps
         if self.emcee_run_method == "fixed":
             # Run burn-in
-            state = sampler.run_mcmc(pos,
-                                     self.n_steps // 4,
-                                     progress=progress,
-                                     )
+            state = sampler.run_mcmc(
+                pos,
+                self.n_steps // 4,
+                progress=progress,
+            )
             sampler.reset()
 
             # Do the full run
-            sampler.run_mcmc(state,
-                             self.n_steps,
-                             progress=progress,
-                             )
+            sampler.run_mcmc(
+                state,
+                self.n_steps,
+                progress=progress,
+            )
 
         elif self.emcee_run_method == "adaptive":
 
             # Set up a tau for testing convergence
             old_tau = np.inf
 
-            for _ in sampler.sample(pos,
-                                    iterations=self.max_steps,
-                                    progress=progress,
-                                    ):
+            for _ in sampler.sample(
+                pos,
+                iterations=self.max_steps,
+                progress=progress,
+            ):
 
                 # Only check convergence every 100 steps
                 if sampler.iteration % 100:
@@ -2069,19 +2310,22 @@ class HyperfineFitter:
                 old_tau = tau
 
         else:
-            raise ValueError(f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
-                             f"not {self.emcee_run_method}")
+            raise ValueError(
+                f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
+                f"not {self.emcee_run_method}"
+            )
 
         return sampler
 
-    def encourage_spatial_coherence(self,
-                                    input_dir='fit',
-                                    output_dir='fit_coherence',
-                                    fit_dict_filename=None,
-                                    n_comp_filename=None,
-                                    likelihood_filename=None,
-                                    reverse_direction=False,
-                                    ):
+    def encourage_spatial_coherence(
+        self,
+        input_dir="fit",
+        output_dir="fit_coherence",
+        fit_dict_filename=None,
+        n_comp_filename=None,
+        likelihood_filename=None,
+        reverse_direction=False,
+    ):
         """Loop over fits to encourage spatial coherence
 
         This will loop over RA/Dec to potentially replace fits
@@ -2104,35 +2348,38 @@ class HyperfineFitter:
                 you should run one case forward, then another backward
         """
 
-        if self.data_type != 'cube':
-            self.logger.warning('Can only do spatial coherence on a cube!')
+        if self.data_type != "cube":
+            self.logger.warning("Can only do spatial coherence on a cube!")
             sys.exit()
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
 
         if fit_dict_filename is None:
-            fit_dict_filename = get_dict_val(self.config,
-                                             self.config_defaults,
-                                             table='multicomponent_fitter',
-                                             key='fit_dict_filename',
-                                             logger=self.logger,
-                                             )
+            fit_dict_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="fit_dict_filename",
+                logger=self.logger,
+            )
 
         if n_comp_filename is None:
-            n_comp_filename = get_dict_val(self.config,
-                                           self.config_defaults,
-                                           table='multicomponent_fitter',
-                                           key='n_comp_filename',
-                                           logger=self.logger,
-                                           )
+            n_comp_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="n_comp_filename",
+                logger=self.logger,
+            )
         if likelihood_filename is None:
-            likelihood_filename = get_dict_val(self.config,
-                                               self.config_defaults,
-                                               table='multicomponent_fitter',
-                                               key='likelihood_filename',
-                                               logger=self.logger,
-                                               )
+            likelihood_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="likelihood_filename",
+                logger=self.logger,
+            )
 
         if reverse_direction:
             step = -1
@@ -2158,18 +2405,20 @@ class HyperfineFitter:
         if overwrite:
 
             # Flush out the directory
-            files_in_dir = glob.glob(os.path.join(output_dir, '*'))
+            files_in_dir = glob.glob(os.path.join(output_dir, "*"))
             for file_in_dir in files_in_dir:
                 os.remove(file_in_dir)
 
-        n_comp = np.load(os.path.join(input_dir, '%s.npy' % n_comp_filename))
-        likelihood = np.load(os.path.join(input_dir, '%s.npy' % likelihood_filename))
+        n_comp = np.load(os.path.join(input_dir, f"{n_comp_filename}.npy"))
+        likelihood = np.load(os.path.join(input_dir, f"{likelihood_filename}.npy"))
         total_found = 0
 
-        ij_list = [(i, j)
-                   for i in range(self.data.shape[1])[::step]
-                   for j in range(self.data.shape[2])[::step]
-                   if self.mask[i, j] != 0]
+        ij_list = [
+            (i, j)
+            for i in range(self.data.shape[1])[::step]
+            for j in range(self.data.shape[2])[::step]
+            if self.mask[i, j] != 0
+        ]
 
         for ij in tqdm(ij_list):
 
@@ -2181,10 +2430,10 @@ class HyperfineFitter:
             j_min = max(0, j - 1)
             j_max = min(self.data.shape[2], j + 2)
 
-            n_comp_cutout = n_comp[i_min: i_max, j_min: j_max]
+            n_comp_cutout = n_comp[i_min:i_max, j_min:j_max]
 
-            input_file = os.path.join(input_dir, '%s_%s_%s.pkl' % (fit_dict_filename, i, j))
-            output_file = os.path.join(output_dir, '%s_%s_%s.pkl' % (fit_dict_filename, i, j))
+            input_file = os.path.join(input_dir, f"{fit_dict_filename}_{i}_{j}.pkl")
+            output_file = os.path.join(output_dir, f"{fit_dict_filename}_{i}_{j}.pkl")
 
             if not os.path.exists(output_file) or overwrite:
 
@@ -2193,9 +2442,11 @@ class HyperfineFitter:
 
                 # Pull original likelihood for the pixel
                 fit_dict = load_fit_dict(input_file)
-                like_original = fit_dict['likelihood']
+                like_original = fit_dict["likelihood"]
 
-                bic_original = ln_m * n_comp_original * len(self.props) - 2 * like_original
+                bic_original = (
+                    ln_m * n_comp_original * len(self.props) - 2 * like_original
+                )
                 aic_original = 2 * n_comp_original * len(self.props) - 2 * like_original
 
                 delta_bic = np.zeros_like(n_comp_cutout)
@@ -2214,49 +2465,54 @@ class HyperfineFitter:
                         if n_comp_new > 0:
 
                             # Check if we already have moved the sampler file
-                            cutout_fit_dict_filename = os.path.join(output_dir,
-                                                                    '%s_%s_%s.pkl'
-                                                                    % (fit_dict_filename, i_full, j_full))
+                            cutout_fit_dict_filename = os.path.join(
+                                output_dir,
+                                f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
+                            )
 
                             if not os.path.exists(cutout_fit_dict_filename):
-                                cutout_fit_dict_filename = os.path.join(input_dir,
-                                                                        '%s_%s_%s.pkl'
-                                                                        % (fit_dict_filename, i_full, j_full))
+                                cutout_fit_dict_filename = os.path.join(
+                                    input_dir,
+                                    f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
+                                )
                             cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
 
                             # If we have the full emcee sampler, prefer that here
                             if "sampler" in cutout_fit_dict:
                                 cutout_sampler = cutout_fit_dict["sampler"]
                                 flat_samples = self.get_samples(cutout_sampler)
-                                pars_new = np.nanmedian(flat_samples,
-                                                        axis=0,
-                                                        )
+                                pars_new = np.nanmedian(
+                                    flat_samples,
+                                    axis=0,
+                                )
 
                             # Else we have these calculated as part of the covariance matrix
                             else:
                                 pars_new = copy.deepcopy(cutout_fit_dict["cov"]["med"])
 
-                            like_new = ln_like(theta=pars_new,
-                                               intensity=self.data[:, i, j],
-                                               intensity_err=self.error[:, i, j],
-                                               vel=self.vel,
-                                               strength_lines=self.strength_lines,
-                                               v_lines=self.v_lines,
-                                               props=self.props,
-                                               n_comp=n_comp_new,
-                                               fit_type=self.fit_type,
-                                               )
+                            like_new = ln_like(
+                                theta=pars_new,
+                                intensity=self.data[:, i, j],
+                                intensity_err=self.error[:, i, j],
+                                vel=self.vel,
+                                strength_lines=self.strength_lines,
+                                v_lines=self.v_lines,
+                                props=self.props,
+                                n_comp=n_comp_new,
+                                fit_type=self.fit_type,
+                            )
                         else:
-                            like_new = ln_like(theta=0,
-                                               intensity=self.data[:, i, j],
-                                               intensity_err=self.error[:, i, j],
-                                               vel=self.vel,
-                                               strength_lines=self.strength_lines,
-                                               v_lines=self.v_lines,
-                                               props=self.props,
-                                               n_comp=n_comp_new,
-                                               fit_type=self.fit_type,
-                                               )
+                            like_new = ln_like(
+                                theta=0,
+                                intensity=self.data[:, i, j],
+                                intensity_err=self.error[:, i, j],
+                                vel=self.vel,
+                                strength_lines=self.strength_lines,
+                                v_lines=self.v_lines,
+                                props=self.props,
+                                n_comp=n_comp_new,
+                                fit_type=self.fit_type,
+                            )
                         bic_new = ln_m * n_comp_new * len(self.props) - 2 * like_new
                         aic_new = 2 * n_comp_new * len(self.props) - 2 * like_new
                         delta_bic[i_cutout, j_cutout] = bic_original - bic_new
@@ -2272,18 +2528,25 @@ class HyperfineFitter:
 
                 fit_updated = False
                 # Use both the BIC and AIC criterion here to distinguish, we require both to be significant
-                if delta_bic[idx] > self.delta_bic_cutoff and delta_aic[idx] > self.delta_aic_cutoff:
+                if (
+                    delta_bic[idx] > self.delta_bic_cutoff
+                    and delta_aic[idx] > self.delta_aic_cutoff
+                ):
                     total_found += 1
                     n_comp[i, j] = n_comp_cutout[idx]
                     likelihood[i, j] = likelihood_cutout[idx]
 
                     # If we're replacing with a file we've already replaced, pull from the output directory. Else
                     # pull from the input directory.
-                    input_file = os.path.join(output_dir, '%s_%s_%s.pkl'
-                                              % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
+                    input_file = os.path.join(
+                        output_dir,
+                        f"{fit_dict_filename}_{idx[0] + i_min}_{idx[1] + j_min}.pkl",
+                    )
                     if not os.path.exists(input_file):
-                        input_file = os.path.join(input_dir, '%s_%s_%s.pkl'
-                                                  % (fit_dict_filename, idx[0] + i_min, idx[1] + j_min))
+                        input_file = os.path.join(
+                            input_dir,
+                            f"{fit_dict_filename}_{idx[0] + i_min}_{idx[1] + j_min}.pkl",
+                        )
                     fit_updated = True
 
                 # If the fits have been updated, then update the likelihood and save out
@@ -2297,23 +2560,26 @@ class HyperfineFitter:
                     if hardlinks_supported:
                         os.link(input_file, output_file)
                     else:
-                        os.system('cp %s %s' % (input_file, output_file))
+                        os.system(f"cp {input_file} {output_file}")
 
-        self.logger.info('Number replaced: %d' % total_found)
+        self.logger.info(f"Number replaced: {total_found}")
 
-        n_comp_output_filename = os.path.join(output_dir, '%s.npy' % n_comp_filename)
-        likelihood_output_filename = os.path.join(output_dir, '%s.npy' % likelihood_filename)
+        n_comp_output_filename = os.path.join(output_dir, f"{n_comp_filename}.npy")
+        likelihood_output_filename = os.path.join(
+            output_dir, f"{likelihood_filename}.npy"
+        )
 
         if not os.path.exists(n_comp_output_filename) or overwrite:
             np.save(n_comp_output_filename, n_comp)
             np.save(likelihood_output_filename, likelihood)
 
-    def get_fits_from_samples(self,
-                              samples,
-                              vel,
-                              n_draws=100,
-                              n_comp=1,
-                              ):
+    def get_fits_from_samples(
+        self,
+        samples,
+        vel,
+        n_draws=100,
+        n_comp=1,
+    ):
         """Get a number of fit lines from an MCMC run
 
         Args:
@@ -2331,41 +2597,47 @@ class HyperfineFitter:
         for draw in range(n_draws):
             sample = np.random.randint(low=0, high=samples.shape[0])
             for i in range(n_comp):
-                theta_draw = samples[sample, ...][len(self.props) * i: len(self.props) * i + len(self.props)]
+                theta_draw = samples[sample, ...][
+                    len(self.props) * i : len(self.props) * i + len(self.props)
+                ]
 
-                if self.fit_type == 'lte':
+                if self.fit_type == "lte":
 
-                    fit_lines[:, draw, i] = hyperfine_structure_lte(*theta_draw,
-                                                                    strength_lines=self.strength_lines,
-                                                                    v_lines=self.v_lines,
-                                                                    vel=vel,
-                                                                    )
+                    fit_lines[:, draw, i] = hyperfine_structure_lte(
+                        *theta_draw,
+                        strength_lines=self.strength_lines,
+                        v_lines=self.v_lines,
+                        vel=vel,
+                    )
 
-                elif self.fit_type == 'pure_gauss':
+                elif self.fit_type == "pure_gauss":
 
-                    fit_lines[:, draw, i] = hyperfine_structure_pure_gauss(*theta_draw,
-                                                                           strength_lines=self.strength_lines,
-                                                                           v_lines=self.v_lines,
-                                                                           vel=vel,
-                                                                           )
+                    fit_lines[:, draw, i] = hyperfine_structure_pure_gauss(
+                        *theta_draw,
+                        strength_lines=self.strength_lines,
+                        v_lines=self.v_lines,
+                        vel=vel,
+                    )
 
-                elif self.fit_type == 'radex':
+                elif self.fit_type == "radex":
 
-                    qn_ul = np.array(range(len(radex_grid['QN_ul'].values)))
+                    qn_ul = np.array(range(len(radex_grid["QN_ul"].values)))
 
-                    fit_lines[:, draw, i] = get_radex_multiple_components(theta_draw,
-                                                                          vel=vel,
-                                                                          v_lines=self.v_lines,
-                                                                          qn_ul=qn_ul,
-                                                                          )
+                    fit_lines[:, draw, i] = get_radex_multiple_components(
+                        theta_draw,
+                        vel=vel,
+                        v_lines=self.v_lines,
+                        qn_ul=qn_ul,
+                    )
 
         return fit_lines
 
-    def create_fit_cube(self,
-                        fit_dict_filename=None,
-                        n_comp_filename=None,
-                        cube_filename=None,
-                        ):
+    def create_fit_cube(
+        self,
+        fit_dict_filename=None,
+        n_comp_filename=None,
+        cube_filename=None,
+    ):
         """Create upper/lower errors for spectral fit plots
 
         Args:
@@ -2381,44 +2653,49 @@ class HyperfineFitter:
         overwrite = check_overwrite(self.config, f_name)
 
         if fit_dict_filename is None:
-            fit_dict_filename = get_dict_val(self.config,
-                                             self.config_defaults,
-                                             table='multicomponent_fitter',
-                                             key='fit_dict_filename',
-                                             logger=self.logger,
-                                             )
+            fit_dict_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="fit_dict_filename",
+                logger=self.logger,
+            )
         if n_comp_filename is None:
-            n_comp_filename = get_dict_val(self.config,
-                                           self.config_defaults,
-                                           table='multicomponent_fitter',
-                                           key='n_comp_filename',
-                                           logger=self.logger,
-                                           )
+            n_comp_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="n_comp_filename",
+                logger=self.logger,
+            )
 
         if cube_filename is None:
-            cube_filename = get_dict_val(self.config,
-                                         self.config_defaults,
-                                         table='create_fit_cube',
-                                         key='cube_filename',
-                                         logger=self.logger,
-                                         )
+            cube_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="create_fit_cube",
+                key="cube_filename",
+                logger=self.logger,
+            )
 
-        chunksize = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='create_fit_cube',
-                                 key='chunksize',
-                                 logger=self.logger,
-                                 )
+        chunksize = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="create_fit_cube",
+            key="chunksize",
+            logger=self.logger,
+        )
 
-        if not os.path.exists('%s.npy' % cube_filename) or overwrite:
+        if not os.path.exists(f"{cube_filename}.npy") or overwrite:
 
-            ij_list = [(i, j)
-                       for i in range(self.data.shape[1])
-                       for j in range(self.data.shape[2])
-                       if self.mask[i, j] != 0
-                       ]
+            ij_list = [
+                (i, j)
+                for i in range(self.data.shape[1])
+                for j in range(self.data.shape[2])
+                if self.mask[i, j] != 0
+            ]
 
-            n_comp = np.load('%s.npy' % n_comp_filename)
+            n_comp = np.load(f"{n_comp_filename}.npy")
 
             # Setup fit cube
 
@@ -2431,28 +2708,30 @@ class HyperfineFitter:
                             partial(
                                 self.parallel_fit_samples,
                                 fit_dict_filename=fit_dict_filename,
-                                n_comp=n_comp),
+                                n_comp=n_comp,
+                            ),
                             ij_list,
                             chunksize=chunksize,
                         ),
-                        total=len(ij_list)
+                        total=len(ij_list),
                     )
                 )
 
             for idx, ij in enumerate(ij_list):
                 fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
 
-            np.save('%s.npy' % cube_filename, fit_cube)
+            np.save(f"{cube_filename}.npy", fit_cube)
 
-    def parallel_fit_samples(self,
-                             ij,
-                             fit_dict_filename=None,
-                             n_comp=None,
-                             ):
+    def parallel_fit_samples(
+        self,
+        ij,
+        fit_dict_filename=None,
+        n_comp=None,
+    ):
         """Pull fit percentiles from a single pixel"""
 
         if not fit_dict_filename or n_comp is None:
-            self.logger.warning('Fit dict filename and n_comp must be defined!')
+            self.logger.warning("Fit dict filename and n_comp must be defined!")
             sys.exit()
 
         i = ij[0]
@@ -2460,7 +2739,7 @@ class HyperfineFitter:
 
         n_comp_pix = int(n_comp[i, j])
 
-        cube_sampler_filename = '%s_%s_%s.pkl' % (fit_dict_filename, i, j)
+        cube_sampler_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
 
         if n_comp_pix == 0:
             return np.zeros([3, len(self.vel)])
@@ -2469,7 +2748,7 @@ class HyperfineFitter:
         # If we have the full emcee sampler, prefer that here
         if "sampler" in fit_dict:
 
-            sampler = fit_dict['sampler']
+            sampler = fit_dict["sampler"]
             flat_samples = self.get_samples(sampler)
 
         # Otherwise, sample from the covariance matrix
@@ -2477,26 +2756,31 @@ class HyperfineFitter:
 
             cov_matrix = fit_dict["cov"]["matrix"]
             cov_med = fit_dict["cov"]["med"]
-            flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
+            flat_samples = np.random.multivariate_normal(
+                cov_med, cov_matrix, size=10000
+            )
 
-        fit_lines = self.get_fits_from_samples(flat_samples,
-                                               vel=self.vel,
-                                               n_draws=100,
-                                               n_comp=n_comp_pix,
-                                               )
+        fit_lines = self.get_fits_from_samples(
+            flat_samples,
+            vel=self.vel,
+            n_draws=100,
+            n_comp=n_comp_pix,
+        )
 
-        fit_percentiles = np.nanpercentile(np.nansum(fit_lines, axis=-1),
-                                           [50, 16, 84],
-                                           axis=1,
-                                           )
+        fit_percentiles = np.nanpercentile(
+            np.nansum(fit_lines, axis=-1),
+            [50, 16, 84],
+            axis=1,
+        )
 
         return fit_percentiles
 
-    def make_parameter_maps(self,
-                            fit_dict_filename=None,
-                            n_comp_filename=None,
-                            maps_filename=None,
-                            ):
+    def make_parameter_maps(
+        self,
+        fit_dict_filename=None,
+        n_comp_filename=None,
+        maps_filename=None,
+    ):
         """Make maps of fitted parameters
 
         Args:
@@ -2508,107 +2792,119 @@ class HyperfineFitter:
                 to None, which will pull from config.toml
         """
 
-        if self.data_type != 'cube':
-            self.logger.warning('Can only make parameter maps for fitted cubes')
+        if self.data_type != "cube":
+            self.logger.warning("Can only make parameter maps for fitted cubes")
             sys.exit()
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
 
         if fit_dict_filename is None:
-            fit_dict_filename = get_dict_val(self.config,
-                                             self.config_defaults,
-                                             table='multicomponent_fitter',
-                                             key='fit_dict_filename',
-                                             logger=self.logger,
-                                             )
+            fit_dict_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="fit_dict_filename",
+                logger=self.logger,
+            )
 
         if n_comp_filename is None:
-            n_comp_filename = get_dict_val(self.config,
-                                           self.config_defaults,
-                                           table='multicomponent_fitter',
-                                           key='n_comp_filename',
-                                           logger=self.logger,
-                                           )
+            n_comp_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="n_comp_filename",
+                logger=self.logger,
+            )
 
         if maps_filename is None:
-            maps_filename = get_dict_val(self.config,
-                                         self.config_defaults,
-                                         table='make_parameter_maps',
-                                         key='maps_filename',
-                                         logger=self.logger,
-                                         )
+            maps_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="make_parameter_maps",
+                key="maps_filename",
+                logger=self.logger,
+            )
 
-        n_samples = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='make_parameter_maps',
-                                 key='n_samples',
-                                 logger=self.logger,
-                                 )
+        n_samples = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="make_parameter_maps",
+            key="n_samples",
+            logger=self.logger,
+        )
 
-        chunksize = get_dict_val(self.config,
-                                 self.config_defaults,
-                                 table='make_parameter_maps',
-                                 key='chunksize',
-                                 logger=self.logger,
-                                 )
+        chunksize = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="make_parameter_maps",
+            key="chunksize",
+            logger=self.logger,
+        )
 
-        n_comp = np.load('%s.npy' % n_comp_filename)
+        n_comp = np.load(f"{n_comp_filename}.npy")
         max_n_comp = int(np.nanmax(n_comp))
 
+        parameter_maps = {}
         if not os.path.exists(maps_filename) or overwrite:
 
             # Set up arrays in a dictionary
 
-            parameter_maps = {}
-
-            parameter_maps['chisq_red'] = np.zeros([self.data.shape[1],
-                                                    self.data.shape[2]])
-            parameter_maps['chisq_red'][parameter_maps['chisq_red'] == 0] = np.nan
+            parameter_maps["chisq_red"] = np.zeros(
+                [self.data.shape[1], self.data.shape[2]]
+            )
+            parameter_maps["chisq_red"][parameter_maps["chisq_red"] == 0] = np.nan
 
             for i in range(max_n_comp):
 
-                keys = ['tpeak_%s' % i,
-                        'tpeak_%s_err_up' % i,
-                        'tpeak_%s_err_down' % i
-                        ]
+                keys = [
+                    f"tpeak_{i}",
+                    f"tpeak_{i}_err_up",
+                    f"tpeak_{i}_err_down",
+                ]
                 for key in keys:
-                    parameter_maps[key] = np.zeros([self.data.shape[1],
-                                                    self.data.shape[2]])
+                    parameter_maps[key] = np.zeros(
+                        [self.data.shape[1], self.data.shape[2]]
+                    )
                     parameter_maps[key][parameter_maps[key] == 0] = np.nan
 
                 for prop in self.props:
 
-                    keys = ['%s_%s' % (prop, i),
-                            '%s_%s_err_up' % (prop, i),
-                            '%s_%s_err_down' % (prop, i)
-                            ]
+                    keys = [
+                        f"{prop}_{i}",
+                        f"{prop}_{i}_err_up",
+                        f"{prop}_{i}_err_down",
+                    ]
                     for key in keys:
-                        parameter_maps[key] = np.zeros([self.data.shape[1],
-                                                        self.data.shape[2]])
+                        parameter_maps[key] = np.zeros(
+                            [self.data.shape[1], self.data.shape[2]]
+                        )
                         parameter_maps[key][parameter_maps[key] == 0] = np.nan
 
             # Loop over each pixel, pulling out the properties for each component, as well as the peak intensity and
             # errors for everything. Parallelize this up for speed
 
-            ij_list = [[i, j]
-                       for i in range(self.data.shape[1])
-                       for j in range(self.data.shape[2])
-                       if self.mask[i, j] != 0
-                       ]
+            ij_list = [
+                [i, j]
+                for i in range(self.data.shape[1])
+                for j in range(self.data.shape[2])
+                if self.mask[i, j] != 0
+            ]
 
             with mp.Pool(self.n_cores) as pool:
                 par_dicts = list(
                     tqdm(
                         pool.imap(
-                            partial(self.parallel_map_making,
-                                    n_comp=n_comp,
-                                    fit_dict_filename=fit_dict_filename,
-                                    n_samples=n_samples),
+                            partial(
+                                self.parallel_map_making,
+                                n_comp=n_comp,
+                                fit_dict_filename=fit_dict_filename,
+                                n_samples=n_samples,
+                            ),
                             ij_list,
                             chunksize=chunksize,
                         ),
-                        total=len(ij_list)
+                        total=len(ij_list),
                     )
                 )
 
@@ -2623,26 +2919,27 @@ class HyperfineFitter:
             # Save out
 
             if maps_filename is not None:
-                with open(maps_filename, 'wb') as f:
+                with open(maps_filename, "wb") as f:
                     pickle.dump(parameter_maps, f)
 
         else:
-            with open(maps_filename, 'rb') as f:
+            with open(maps_filename, "rb") as f:
                 parameter_maps = pickle.load(f)
 
         self.parameter_maps = parameter_maps
         self.max_n_comp = max_n_comp
 
-    def parallel_map_making(self,
-                            ij,
-                            n_comp=None,
-                            fit_dict_filename='fit_dict',
-                            n_samples=500,
-                            ):
+    def parallel_map_making(
+        self,
+        ij,
+        n_comp=None,
+        fit_dict_filename="fit_dict",
+        n_samples=500,
+    ):
         """Pull parameters for map out of a single pixel"""
 
         if n_comp is None:
-            self.logger.warning('n_comp should be defined!')
+            self.logger.warning("n_comp should be defined!")
             sys.exit()
 
         i, j = ij[0], ij[1]
@@ -2655,13 +2952,13 @@ class HyperfineFitter:
 
         if n_comps_pix > 0:
 
-            cube_fit_dict_filename = '%s_%s_%s.pkl' % (fit_dict_filename, i, j)
+            cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
             fit_dict = load_fit_dict(cube_fit_dict_filename)
 
             # If we have the full emcee sampler, prefer that
             if "sampler" in fit_dict:
 
-                sampler = fit_dict['sampler']
+                sampler = fit_dict["sampler"]
                 flat_samples = self.get_samples(sampler)
 
             # Otherwise, pull from the covariance matrix
@@ -2669,21 +2966,24 @@ class HyperfineFitter:
 
                 cov_matrix = fit_dict["cov"]["matrix"]
                 cov_med = fit_dict["cov"]["med"]
-                flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
+                flat_samples = np.random.multivariate_normal(
+                    cov_med, cov_matrix, size=10000
+                )
 
             # Pull out median and errors for each parameter and each component
             param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
             param_diffs = np.diff(param_percentiles, axis=0)
 
             # Pull out model for reduced chi-square
-            total_model = multiple_components(theta=param_percentiles[1, :],
-                                              vel=self.vel,
-                                              strength_lines=self.strength_lines,
-                                              v_lines=self.v_lines,
-                                              props=self.props,
-                                              n_comp=n_comps_pix,
-                                              fit_type=self.fit_type,
-                                              )
+            total_model = multiple_components(
+                theta=param_percentiles[1, :],
+                vel=self.vel,
+                strength_lines=self.strength_lines,
+                v_lines=self.v_lines,
+                props=self.props,
+                n_comp=n_comps_pix,
+                fit_type=self.fit_type,
+            )
 
             for n_comp_pix in range(n_comps_pix):
 
@@ -2694,33 +2994,36 @@ class HyperfineFitter:
                 for sample in range(n_samples):
                     choice_idx = np.random.randint(0, flat_samples.shape[0])
                     theta = flat_samples[
-                            choice_idx,
-                            idx_offset * n_comp_pix: idx_offset * n_comp_pix + idx_offset
-                            ]
+                        choice_idx,
+                        idx_offset * n_comp_pix : idx_offset * n_comp_pix + idx_offset,
+                    ]
 
                     if self.fit_type == "lte":
-                        model = hyperfine_structure_lte(*theta,
-                                                        strength_lines=self.strength_lines,
-                                                        v_lines=self.v_lines,
-                                                        vel=self.vel,
-                                                        )
+                        model = hyperfine_structure_lte(
+                            *theta,
+                            strength_lines=self.strength_lines,
+                            v_lines=self.v_lines,
+                            vel=self.vel,
+                        )
 
-                    elif self.fit_type == 'pure_gauss':
-                        model = hyperfine_structure_pure_gauss(*theta,
-                                                               strength_lines=self.strength_lines,
-                                                               v_lines=self.v_lines,
-                                                               vel=self.vel,
-                                                               )
+                    elif self.fit_type == "pure_gauss":
+                        model = hyperfine_structure_pure_gauss(
+                            *theta,
+                            strength_lines=self.strength_lines,
+                            v_lines=self.v_lines,
+                            vel=self.vel,
+                        )
 
-                    elif self.fit_type == 'radex':
+                    elif self.fit_type == "radex":
 
-                        model = hyperfine_structure_radex(*theta,
-                                                          v_lines=self.v_lines,
-                                                          vel=self.vel,
-                                                          )
+                        model = hyperfine_structure_radex(
+                            *theta,
+                            v_lines=self.v_lines,
+                            vel=self.vel,
+                        )
 
                     else:
-                        self.logger.warning('Fit type %s not understood!' % self.fit_type)
+                        self.logger.warning(f"Fit type {self.fit_type} not understood!")
                         sys.exit()
 
                     tpeak[sample] = np.nanmax(model)
@@ -2728,23 +3031,25 @@ class HyperfineFitter:
                 tpeak_percentiles = np.percentile(tpeak, [16, 50, 84], axis=0)
                 tpeak_diff = np.diff(tpeak_percentiles)
 
-                par_dict['tpeak_%s' % n_comp_pix] = tpeak_percentiles[1]
-                par_dict['tpeak_%s_err_down' % n_comp_pix] = tpeak_diff[0]
-                par_dict['tpeak_%s_err_up' % n_comp_pix] = tpeak_diff[1]
+                par_dict[f"tpeak_{n_comp_pix}"] = tpeak_percentiles[1]
+                par_dict[f"tpeak_{n_comp_pix}_err_down"] = tpeak_diff[0]
+                par_dict[f"tpeak_{n_comp_pix}_err_up"] = tpeak_diff[1]
 
                 # Pull out fitted properties and errors for each component
 
                 for prop_idx, prop in enumerate(self.props):
                     param_idx = n_comp_pix * len(self.props) + prop_idx
-                    par_dict['%s_%s' % (prop, n_comp_pix)] = param_percentiles[1, param_idx]
-                    par_dict['%s_%s_err_down' % (prop, n_comp_pix)] = param_diffs[0, param_idx]
-                    par_dict['%s_%s_err_up' % (prop, n_comp_pix)] = param_diffs[1, param_idx]
+                    par_dict[f"{prop}_{n_comp_pix}"] = param_percentiles[1, param_idx]
+                    par_dict[f"{prop}_{n_comp_pix}_err_down"] = param_diffs[
+                        0, param_idx
+                    ]
+                    par_dict[f"{prop}_{n_comp_pix}_err_up"] = param_diffs[1, param_idx]
 
         else:
             total_model = np.zeros_like(obs)
 
         chisq = chi_square(obs, total_model, obs_err)
         deg_freedom = len(obs[~np.isnan(obs)]) - (n_comps_pix * len(self.props))
-        par_dict['chisq_red'] = chisq / deg_freedom
+        par_dict["chisq_red"] = chisq / deg_freedom
 
         return par_dict

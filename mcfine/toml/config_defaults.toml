@@ -1,32 +1,32 @@
 [fitting_params]
-lmfit_method = 'default'
-fit_type = 'lte'
-fit_method = 'mcmc'
+lmfit_method = "default"
+fit_type = "lte"
+fit_method = "mcmc"
 keep_sampler = true
 keep_covariance = true
 
-line = 'n2hp10'
-rest_freq = ''
+line = "n2hp10"
+rest_freq = ""
 
 [generate_radex_grid]
 
-output_file = 'radex_output.nc'
-t_kin = ''
+output_file = "radex_output.nc"
+t_kin = ""
 t_kin_step = 5
-n_mol = ''
+n_mol = ""
 n_mol_step=0.2
-n_h2=''
+n_h2= ""
 n_h2_step=0.2
-dv=''
+dv= ""
 dv_step=1
-geom = 'uni'
+geom = "uni"
 progress = true
 
 [multicomponent_fitter]
 
-fit_dict_filename = 'fit_dict'
-n_comp_filename = 'n_comp'
-likelihood_filename = 'likelihood'
+fit_dict_filename = "fit_dict"
+n_comp_filename = "n_comp"
+likelihood_filename = "likelihood"
 chunksize = 16
 save = true
 progress = true
@@ -39,7 +39,7 @@ radex = [20, 14, 6, 0, 0.5]
 
 [lmfit]
 
-method = 'basinhopping'
+method = "basinhopping"
 minimizer_kwargs.method = "Powell"
 
 [mcmc]
@@ -59,12 +59,12 @@ max_steps = 100000
 
 [create_fit_cube]
 
-cube_filename = 'fit_cube'
+cube_filename = "fit_cube"
 chunksize = 64
 
 [make_parameter_maps]
 
-maps_filename = 'maps'
+maps_filename = "maps"
 n_samples = 500
 chunksize = 256
 
@@ -78,24 +78,27 @@ make_parameter_maps = false
 
 [plotting]
 
-file_exts = ['png', 'pdf']
+file_exts = [
+    "png",
+    "pdf",
+]
 chunksize = 1
 
 [plot_step]
 
-plot_name = 'step'
+plot_name = "step"
 
 [plot_corner]
 
-plot_name = 'corner'
+plot_name = "corner"
 
 [plot_fit]
 
-plot_name = 'fit'
+plot_name = "fit"
 show_individual_components = true
 show_hyperfine_components = false
 n_points = 1000
 n_draws = 100
 figsize = [10, 4]
-x_label = 'Velocity (km s$^{-1}$)'
-y_label = 'Intensity (K)'
+x_label = "Velocity (km s$^{-1}$)"
+y_label = "Intensity (K)"

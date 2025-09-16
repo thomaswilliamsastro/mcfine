@@ -13,7 +13,7 @@ are accessed by the ``fit_type`` parameter:
 .. code-block:: toml
 
   [fitting_params]
-  fit_type = 'lte'  # Can be 'lte', 'radex', or 'pure_gauss'
+  fit_type = "lte"  # Can be "lte", "radex", or "pure_gauss"
 
 ===============
 Initial guesses
@@ -50,6 +50,7 @@ a string for ``n_walkers`` under the ``[mcmc]`` section: if you use something li
 
 .. code-block:: toml
 
+   [mcmc]
    n_walkers = "3*n_params"
 
 then the number of walkers will be adapted to the number of components being fit.
@@ -130,8 +131,9 @@ can also directly access the `emcee` sampler object:
 
 .. code-block:: python
 
-    with open(file_name, 'rb') as f:
-        fit_dict = pickle.load(f)
+    from mcfine.utils import load_fit_dict
+
+    fit_dict = load_fit_dict(file_name)
     sampler = fit_dict["sampler"]
 
 from there, you can mess around with this as you'd like.

@@ -1,8 +1,8 @@
 [local]
 
-radex_datafile = 'n2h+_hfs.dat'
+radex_datafile = "n2h+_hfs.dat"
 
-fit_dir = 'fit'
-plot_dir = 'plot'
+fit_dir = "fit"
+plot_dir = "plot"
 
-n_cores = ''
+n_cores = ""

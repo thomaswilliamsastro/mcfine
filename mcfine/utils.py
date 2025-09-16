@@ -2,54 +2,64 @@ import os
 import pickle
 import tomllib
 
-CONFIG_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'config_defaults.toml')
-LOCAL_DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'toml', 'local_defaults.toml')
+DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DEFAULT_PATH = os.path.join(
+    DEFAULT_DIR,
+    "toml",
+    "config_defaults.toml",
+)
+LOCAL_DEFAULT_PATH = os.path.join(
+    DEFAULT_DIR,
+    "toml",
+    "local_defaults.toml",
+)
 
 
 def print_config_params():
     """Print out all config parameters, and default values"""
 
-    with open(CONFIG_DEFAULT_PATH, 'rb') as f:
+    with open(CONFIG_DEFAULT_PATH, "rb") as f:
         config_defaults = tomllib.load(f)
-    with open(LOCAL_DEFAULT_PATH, 'rb') as f:
+    with open(LOCAL_DEFAULT_PATH, "rb") as f:
         local_defaults = tomllib.load(f)
 
-    print('Config Defaults:\n')
+    print("Config Defaults:\n")
 
     for table in config_defaults.keys():
 
-        print('[%s]' % table)
+        print(f"[{table}]")
 
         for key in config_defaults[table].keys():
 
             value = config_defaults[table][key]
             value_type = type(value)
 
-            print('--%s\n----default: %s, type: %s' % (key, value, value_type))
+            print(f"--{key}\n----default: {value}, type: {value_type}")
 
-        print('\n')
+        print("\n")
 
-    print('Local Defaults:\n')
+    print("Local Defaults:\n")
 
     for table in local_defaults.keys():
 
-        print('[%s]' % table)
+        print(f"[{table}]")
 
         for key in local_defaults[table].keys():
             value = local_defaults[table][key]
             value_type = type(value)
 
-            print('--%s\n----default: %s, type: %s' % (key, value, value_type))
+            print(f"--{key}\n----default: {value}, type: {value_type}")
 
-        print('\n')
+        print("\n")
 
 
-def get_dict_val(val_dict,
-                 default_val_dict,
-                 table,
-                 key,
-                 logger=None,
-                 ):
+def get_dict_val(
+    val_dict,
+    default_val_dict,
+    table,
+    key,
+    logger=None,
+):
     """Get value from a dictionary, falling to default if not present.
 
     Args:
@@ -70,14 +80,15 @@ def get_dict_val(val_dict,
 
     dict_val = default_val_dict[table][key]
     if logger is not None:
-        logger.info('No %s provided. Defaulting to %s' % (key, dict_val))
+        logger.info(f"No {key} provided. Defaulting to {dict_val}")
 
     return dict_val
 
 
-def check_overwrite(val_dict,
-                    key,
-                    ):
+def check_overwrite(
+    val_dict,
+    key,
+):
     """Check if overwrite is in a dict.
 
     Args:
@@ -89,19 +100,20 @@ def check_overwrite(val_dict,
 
     """
 
-    if 'overwrites' in val_dict:
+    if "overwrites" in val_dict:
 
-        if key in val_dict['overwrites']:
-            return val_dict['overwrites'][key]
+        if key in val_dict["overwrites"]:
+            return val_dict["overwrites"][key]
         else:
             return False
 
     return False
 
 
-def save_fit_dict(fit_dict,
-                  file_name,
-                  ):
+def save_fit_dict(
+    fit_dict,
+    file_name,
+):
     """Save a fit dictionary
 
     Args:
@@ -114,12 +126,13 @@ def save_fit_dict(fit_dict,
     if not os.path.exists(fit_dir):
         os.makedirs(fit_dir)
 
-    with open(file_name, 'wb') as f:
+    with open(file_name, "wb") as f:
         pickle.dump(fit_dict, f)
 
 
-def load_fit_dict(file_name,
-                  ):
+def load_fit_dict(
+    file_name,
+):
     """Load a pickled fit dict
 
     Args:
@@ -130,7 +143,7 @@ def load_fit_dict(file_name,
 
     """
 
-    with open(file_name, 'rb') as f:
+    with open(file_name, "rb") as f:
         fit_dict = pickle.load(f)
 
     return fit_dict

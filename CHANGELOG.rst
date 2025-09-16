@@ -6,6 +6,7 @@ Changelog
 0.3 (Unreleased)
 ================
 
+* General script tidying up
 * Add ``adaptive`` options for the emcee, to automatically choose walkers/steps
 * Add option to reduce the emcee sampler down to a covariance matrix, to minimize space requirement
 * Ensure likelihood is correctly updated when encouraging spatial coherence
