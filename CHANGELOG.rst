@@ -3,7 +3,7 @@ Changelog
 #########
 
 ================
-0.3 (Unreleased)
+0.3 (2025-09-16)
 ================
 
 * General script tidying up
@@ -28,7 +28,7 @@ Changelog
 * Added ``loc_image`` to ``plot_fit``, to locate the fit within the image
 
 ================
-0.2 (01/07/2024)
+0.2 (2024-07-01)
 ================
 
 * Updated GitHub actions
@@ -39,7 +39,7 @@ Changelog
 * Much improved documentation
 
 ================
-0.1 (17/11/2021)
+0.1 (2021-11-17)
 ================
 
 * Initial Release

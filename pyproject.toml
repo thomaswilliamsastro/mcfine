@@ -1,18 +1,18 @@
 [project]
 
 name = "mcfine"
-version = "0.2"
+version = "0.3"
 description = "Monte-Carlo, Multi-Component ISM Fitting"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 
 authors = [
-    {name = "Thomas G. Williams", email = "thomas.williams@physics.ox.ac.uk"},
+    {name = "Thomas G. Williams", email = "thomas.williams-4@manchester.ac.uk"},
     {name = "Elizabeth J. Watkins", email = "elizabeth.watkins@manchester.ac.uk"},
 ]
 maintainers = [
-    {name = "Thomas G. Williams", email = "thomas.williams@physics.ox.ac.uk"},
+    {name = "Thomas G. Williams", email = "thomas.williams-4@manchester.ac.uk"},
 ]
 
 classifiers = [
