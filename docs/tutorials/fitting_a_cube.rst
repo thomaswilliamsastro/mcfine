@@ -7,18 +7,15 @@ reasonably flexible and simple to interface with. First, we need to load in the 
 
 .. code-block:: python
 
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
+   import tomllib
 
-   config_file = 'config.toml'
-   local_file = 'local.toml'
+   config_file = "config.toml"
+   local_file = "local.toml"
 
-    with open(config_file, 'rb') as f:
+    with open(config_file, "rb") as f:
         config = tomllib.load(f)
 
-    with open(local_file, 'rb') as f:
+    with open(local_file, "rb") as f:
         local = tomllib.load(f)
 
 Next, a few filenames for various output files. We need the input cube, as well as files for the output parameter maps,
@@ -27,30 +24,40 @@ are not strictly necessary. We also set up some directories for the individual f
 
 .. code-block:: python
 
-    target = 'g316_75'
+    target = "g316_75"
 
-    fit_dict_filename = f'{target}_fit_dict'
-    n_comp_filename = f'{target}_n_comp'
-    likelihood_filename = f'{target}_likelihood'
-    fit_cube_filename = f'{target}_fit_cube'
-    hdu_name = os.path.join(f'{target}.fits')
+    fit_dict_filename = f"{target}_fit_dict"
+    n_comp_filename = f"{target}_n_comp"
+    likelihood_filename = f"{target}_likelihood"
+    fit_cube_filename = f"{target}_fit_cube"
+    hdu_name = f"{target}.fits"
 
-    original_fit_dir = 'original'
-    coherence_forward_dir = 'coherence_forward'
-    coherence_backward_dir = 'coherence_backward'
+    original_fit_dir = "original"
+    coherence_forward_dir = "coherence_forward"
+    coherence_backward_dir = "coherence_backward"
 
-    hdu = fits.open(hdu_name)[0]
-    err_hdu = fits.open(hdu_name.replace('.fits', '_noise.fits'))[0]
-    mask_hdu = fits.open(hdu_name.replace('.fits', '_mask.fits'))[0]
+    err_hdu_name = hdu_name.replace(".fits", "_noise.fits")
+    mask_hdu_name = hdu_name.replace(".fits", "_mask.fits")
 
-We'll set the data up to be read properly into ``mcfine`` now. This involves generating a mask of pixels to be fit,
-the velocity information and error maps
+    # Pull out various data we need from HDUs
+    with fits.open(hdu_name) as hdu, fits.open(err_hdu_name) as err_hdu, fits.open(mask_hdu_name) as mask_hdu:
+
+       data = hdu[0].data
+       err = err_hdu[0].data
+       mask = mask_hdu[0].data
+
+       # Also get velocity informations
+       vel_delt = hdu[0].header["CDELT3"]
+       vel_val = hdu[0].header["CRVAL3"]
+       vel_pix = hdu[0].header["CRPIX3"]
+
+       velocity = np.array([vel_val + (i - (vel_pix - 1)) * vel_delt for i in range(hdu.data.shape[0])])
+       velocity /= 1e3
+
+We'll set the data up to be read properly into ``mcfine`` now. This involves generating error maps and a mask of
+pixels to fit:
 
 .. code-block:: python
-
-    data = hdu.data
-    err = err_hdu.data
-    mask = mask_hdu.data
 
     # Add in a calibration uncertainty of 10%
     calibration_uncertainty = 0.1
@@ -63,16 +70,11 @@ the velocity information and error maps
 
     nan_mask = np.where(mask == 0)
 
-    vel_delt = hdu.header['CDELT3']
-    vel_val = hdu.header['CRVAL3']
-    vel_pix = hdu.header['CRPIX3']
-
-    velocity = np.array([vel_val + (i - (vel_pix - 1)) * vel_delt for i in range(hdu.data.shape[0])])
-    velocity /= 1e3
-
 We can now throw this all into ``mcfine``!
 
 .. code-block:: python
+
+    from mcfine import HyperfineFitter
 
     hf_fitter = HyperfineFitter(data=data,
                                 vel=velocity,
@@ -86,7 +88,7 @@ We start with a first pass through, fitting all pixels defined by our mask:
 
 .. code-block:: python
 
-    print('First-pass fitting')
+    print("First-pass fitting")
     hf_fitter.multicomponent_fitter(fit_dict_filename=os.path.join(original_fit_dir, fit_dict_filename),
                                     n_comp_filename=os.path.join(original_fit_dir, n_comp_filename),
                                     likelihood_filename=os.path.join(original_fit_dir, likelihood_filename),
@@ -98,14 +100,14 @@ with neighbours, but typically will only replace 10% or less of the fits
 
 .. code-block:: python
 
-    print('Spatial coherence forwards')
+    print("Spatial coherence forwards")
     hf_fitter.encourage_spatial_coherence(fit_dict_filename=fit_dict_filename,
                                           input_dir=original_fit_dir,
                                           output_dir=coherence_forward_dir,
                                           n_comp_filename=n_comp_filename,
                                           likelihood_filename=likelihood_filename,
                                           )
-    print('Spatial coherence backwards')
+    print("Spatial coherence backwards")
     hf_fitter.encourage_spatial_coherence(fit_dict_filename=fit_dict_filename,
                                           input_dir=coherence_forward_dir,
                                           output_dir=coherence_backward_dir,
@@ -118,13 +120,13 @@ Following this, fitting is complete! We will now generate parameter maps and the
 
 .. code-block:: python
 
-    print('Creating maps')
+    print("Creating maps")
     hf_fitter.make_parameter_maps(n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                                   fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
-                                  maps_filename=os.path.join(f'{target}_maps.pkl' % file_name),
+                                  maps_filename=f"{target}_maps.pkl",
                                   )
 
-    print('Creating fit cubes')
+    print("Creating fit cubes")
     hf_fitter.create_fit_cube(fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                               n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                               cube_filename=fit_cube_filename)

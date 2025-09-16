@@ -13,7 +13,7 @@ Fitting
 HyperfineFitter
 ***************
 
-.. autoclass:: mcfine.fitting.HyperfineFitter
+.. autoclass:: mcfine.HyperfineFitter
     :members:
 
 ========
@@ -27,7 +27,7 @@ Plotting
 HyperfinePlotter
 ****************
 
-.. autoclass:: mcfine.plotting.HyperfinePlotter
+.. autoclass:: mcfine.HyperfinePlotter
     :members:
 
 =========

@@ -21,7 +21,7 @@ Developers
 
 This package has been developed by:
 
-* Thomas Williams (Oxford)
+* Thomas Williams (Manchester)
 * Elizabeth Watkins (Manchester)
 
 Citing McFine

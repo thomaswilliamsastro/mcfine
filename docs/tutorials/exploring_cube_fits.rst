@@ -11,7 +11,7 @@ which is a dictionary that we can pull things out of:
     maps = hf_fitter.parameter_maps
 
     # Get the reduced chi-square
-    chisq_red = maps['chisq_red']
+    chisq_red = maps["chisq_red"]
 
 You can then plot this up however you might like:
 
@@ -26,7 +26,7 @@ except you can also provide a grid to cut down the number of plots created. For 
 
 .. code-block:: python
 
-    plot_dir = 'plots'
+    plot_dir = "plots"
 
     grid = np.zeros_like(chisq_red)
 
@@ -36,15 +36,15 @@ except you can also provide a grid to cut down the number of plots created. For 
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
 
-    hf_plotter.plot_step(plot_name=os.path.join(fit_dir, plot_dir, f'{target}_step'),
+    hf_plotter.plot_step(plot_name=os.path.join(fit_dir, plot_dir, f"{target}_step"),
                          fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                          n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                          grid=grid)
-    hf_plotter.plot_corner(plot_name=os.path.join(plot_dir, f'{target}_corner'),
+    hf_plotter.plot_corner(plot_name=os.path.join(plot_dir, f"{target}_corner"),
                            fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                            n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                            grid=grid)
-    hf_plotter.plot_fit(plot_name=os.path.join(plot_dir, f'{target}_fit'),
+    hf_plotter.plot_fit(plot_name=os.path.join(plot_dir, f"{target}_fit"),
                         fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                         n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                         grid=grid)

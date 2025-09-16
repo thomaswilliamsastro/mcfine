@@ -24,10 +24,10 @@ This is how you can generate an N2H+ spectrum (which here is centred around a ve
     # Get the line info out for N2H+
     strength_lines_n2hp = np.array([strength_lines[line_name]
                                     for line_name in strength_lines.keys()
-                                    if 'n2hp10' in line_name])
+                                    if "n2hp10" in line_name])
     v_lines_n2hp = np.array([v_lines[line_name]
                              for line_name in v_lines.keys()
-                             if 'n2hp10' in line_name])
+                             if "n2hp10" in line_name])
 
     # Randomly draw parameters for each component, between certain bounds. We use
     # log(tau) since we'll end up fitting in log-space
@@ -55,7 +55,12 @@ This is how you can generate an N2H+ spectrum (which here is centred around a ve
         theta.extend([t_ex[i], tau[i], v[i], sigma[i]])
 
     # Generate noise-free spectrum
-    props = ['tex', 'tau', 'v', 'sigma']
+    props = [
+       "tex",
+       "tau",
+       "v",
+       "sigma",
+    ]
     spectrum_noise_free = multiple_components(theta=theta,
                                               vel=vel,
                                               strength_lines=strength_lines_n2hp,
@@ -74,11 +79,15 @@ This is how you can generate an N2H+ spectrum (which here is centred around a ve
 
     # Finally, let's plot this spectrum
     plt.figure(figsize=(8, 4))
-    plt.step(vel, spectrum_obs, where='mid', c='k')
+    plt.step(vel,
+             spectrum_obs,
+             where="mid",
+             c="k",
+    )
 
     plt.grid()
 
-    plt.xlabel('Velocity (km/s)')
-    plt.ylabel('Intensity (K)')
+    plt.xlabel("Velocity (km/s)")
+    plt.ylabel("Intensity (K)")
 
 .. image:: images/synth_spec.png
