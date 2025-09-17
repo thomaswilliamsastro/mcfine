@@ -2,6 +2,12 @@
 Changelog
 #########
 
+==================
+0.3.1 (Unreleased)
+==================
+
+* Include iterative initialisation for MCMC runs
+
 ================
 0.3 (2025-09-16)
 ================
