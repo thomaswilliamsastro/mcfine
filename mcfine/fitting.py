@@ -1105,6 +1105,24 @@ class HyperfineFitter:
         )
         self.burn_in = burn_in
 
+        n_initialisation = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="n_initialisation",
+            logger=self.logger,
+        )
+        self.n_initialisation = n_initialisation
+
+        n_initialisation_steps = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="mcmc",
+            key="n_initialisation_steps",
+            logger=self.logger,
+        )
+        self.n_initialisation_steps = n_initialisation_steps
+
         # Variables for fixed fitting method
         n_steps = get_dict_val(
             self.config,
@@ -1946,10 +1964,16 @@ class HyperfineFitter:
                         it_data = data_interp - it_model
 
                         # Find lines. We impose no flux cut here
+                        # flux_threshold = np.nanmedian(error) * u.K
+                        flux_threshold = None
                         spec = Spectrum(
-                            flux=it_data * u.K, spectral_axis=self.vel * u.km / u.s
+                            flux=it_data * u.K,
+                            spectral_axis=self.vel * u.km / u.s,
                         )
-                        found_lines = find_lines_derivative(spec)
+                        found_lines = find_lines_derivative(
+                            spec,
+                            flux_threshold=flux_threshold,
+                        )
 
                         # Only take emission lines
                         found_lines = found_lines[
@@ -1959,7 +1983,7 @@ class HyperfineFitter:
                         # Now take these lines and order by flux
                         found_line_fluxes = np.array(
                             [
-                                float(it_data[x])
+                                float(np.abs(it_data[x]))
                                 for x in found_lines["line_center_index"]
                             ]
                         )
@@ -1979,14 +2003,11 @@ class HyperfineFitter:
                                 params[key].set(value=lmfit_result.params[key].value)
 
                         for j in range(prop_len):
-                            b_min = copy.deepcopy(bounds[j][0])
-                            b_max = copy.deepcopy(bounds[j][1])
-
                             params.add(
                                 f"{self.props[j]}_{comp}",
                                 value=p0[j],
-                                min=b_min,
-                                max=b_max,
+                                min=bounds[j][0],
+                                max=bounds[j][1],
                             )
 
                         # Get a fit to the actual data
@@ -2039,15 +2060,13 @@ class HyperfineFitter:
                 p0_fit_sort = [
                     p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort
                 ]
-                p0_fit = [item for sublist in p0_fit_sort for item in sublist]
+                p0_fit = np.array([item for sublist in p0_fit_sort for item in sublist])
+
+            # Ensure we have an array here
+            if not isinstance(p0_fit, np.ndarray):
+                p0_fit = np.array(p0_fit)
 
             n_dims = len(p0_fit)
-
-            # Shuffle the parameters around a little. For values very close to 0, don't base this on the value itself
-            p0_movement = np.max(
-                np.array([0.01 * np.abs(p0_fit), 0.01 * np.ones_like(p0_fit)]),
-                axis=0,
-            )
 
             # If we have an adaptive number of walkers, account for that here
             if isinstance(self.n_walkers, str):
@@ -2055,36 +2074,10 @@ class HyperfineFitter:
             else:
                 n_walkers = copy.deepcopy(self.n_walkers)
 
-            pos = np.array(p0_fit) + p0_movement * np.random.randn(n_walkers, n_dims)
-
-            # Enforce positive values for t_ex, width for the LTE fitting
-
-            if self.fit_type == "lte":
-                positive_idx = [0, 3]
-            elif self.fit_type == "pure_gauss":
-                positive_idx = [0, 2]
-            elif self.fit_type == "radex":
-                positive_idx = [0, 1, 4]
-            else:
-                self.logger.warning(f"Fit type {self.fit_type} not understood!")
-                sys.exit()
-
-            prop_len = len(self.props)
-
-            enforced_positives = [
-                [prop_len * i + j] for i in range(n_comp) for j in positive_idx
-            ]
-            enforced_positives = [
-                item for sublist in enforced_positives for item in sublist
-            ]
-
-            for i in enforced_positives:
-                pos[:, i] = np.abs(pos[:, i])
-
             sampler = self.emcee_wrapper(
                 data,
                 error,
-                pos=pos,
+                p0=p0_fit,
                 n_walkers=n_walkers,
                 n_dims=n_dims,
                 n_comp=n_comp,
@@ -2123,11 +2116,71 @@ class HyperfineFitter:
 
         return sampler
 
+    def initialise_positions(
+        self,
+        p0,
+        n_walkers,
+        n_dims,
+        n_comp,
+        data_percentage=False,
+    ):
+        """Initialise positions for the walkers
+
+        Args:
+            p0: "best fit" values
+            n_walkers: number of walkers
+            n_dims: number of dimensions
+            n_comp: number of components
+            data_percentage: Whether to move walkers
+                around based on a percentage of data.
+                Defaults to False
+        """
+
+        # Shuffle the parameters around a little.
+
+        # If we're using some percentage of the data, include that here,
+        # but avoid values less than 1
+        if data_percentage:
+            p0_movement = np.max(
+                np.array([1e-2 * np.abs(p0), 1e-2 * np.ones_like(p0)]),
+                axis=0,
+            )
+        else:
+            p0_movement = 1e-4 * np.ones_like(p0)
+
+        # Reinitialise the walkers at this point, wiggle around a small amount
+        pos = p0 + p0_movement * np.random.randn(n_walkers, n_dims)
+
+        # Enforce positive values for t_ex, width for the LTE/pure Gaussian fitting
+        if self.fit_type == "lte":
+            positive_idx = [0, 3]
+        elif self.fit_type == "pure_gauss":
+            positive_idx = [0, 2]
+        elif self.fit_type == "radex":
+            positive_idx = [0, 1, 4]
+        else:
+            self.logger.warning(f"Fit type {self.fit_type} not understood!")
+            sys.exit()
+
+        prop_len = len(self.props)
+
+        enforced_positives = [
+            [prop_len * i + j] for i in range(n_comp) for j in positive_idx
+        ]
+        enforced_positives = [
+            item for sublist in enforced_positives for item in sublist
+        ]
+
+        for i in enforced_positives:
+            pos[:, i] = np.abs(pos[:, i])
+
+        return pos
+
     def emcee_wrapper(
         self,
         data,
         error,
-        pos,
+        p0,
         n_walkers,
         n_dims,
         n_comp=1,
@@ -2141,7 +2194,7 @@ class HyperfineFitter:
         Args:
             data: Observed data
             error: Observed uncertainty
-            pos: Position for the walkers
+            p0: Initial guess position for the walkers
             n_walkers: Number of emcee walkers
             n_dims: Number of dimensions for the problem
             n_comp: Number of components to fit. Defaults
@@ -2158,7 +2211,7 @@ class HyperfineFitter:
                 sampler = self.run_mcmc_sampler(
                     data=data,
                     error=error,
-                    pos=pos,
+                    p0=p0,
                     n_walkers=n_walkers,
                     n_dims=n_dims,
                     n_comp=n_comp,
@@ -2172,7 +2225,7 @@ class HyperfineFitter:
             sampler = self.run_mcmc_sampler(
                 data=data,
                 error=error,
-                pos=pos,
+                p0=p0,
                 n_walkers=n_walkers,
                 n_dims=n_dims,
                 n_comp=n_comp,
@@ -2187,39 +2240,47 @@ class HyperfineFitter:
     ):
         """Get samples from an emcee sampler"""
 
-        # If we're fixed, then discard half the steps
-        if self.emcee_run_method == "fixed":
-            samples = sampler.get_chain(
-                discard=self.n_steps // 2,
-                flat=True,
-            )
+        # Get the burn-in and thin parameters from
+        # the sampler
+        burn_in, thin = self.get_burn_in_thin(sampler)
 
-        # If we're adaptive, use parameters provided as a function
-        # of the autocorrelation length
-        elif self.emcee_run_method == "adaptive":
-
-            tau = sampler.get_autocorr_time(tol=0)
-            burn_in = int(self.burn_in * np.max(tau))
-            thin = int(self.thin * np.min(tau))
-
-            samples = sampler.get_chain(
-                discard=burn_in,
-                thin=thin,
-                flat=True,
-            )
-        else:
-            raise ValueError(
-                f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
-                f"not {self.emcee_run_method}"
-            )
+        samples = sampler.get_chain(
+            discard=burn_in,
+            thin=thin,
+            flat=True,
+        )
 
         return samples
+
+    def get_burn_in_thin(
+        self,
+        sampler,
+    ):
+        """Get burn-in and thin from a sampler
+
+        Args:
+            sampler: emcee sampler
+        """
+
+        tau = sampler.get_autocorr_time(tol=0)
+
+        # Fallback if the autocorrelation time is
+        # all NaN
+        if np.all(np.isnan(tau)):
+            self.logger.warning("Autocorrelation time is NaN, will use all samples")
+            burn_in = 0
+            thin = 0
+        else:
+            burn_in = int(self.burn_in * np.nanmax(tau))
+            thin = int(self.thin * np.nanmin(tau))
+
+        return burn_in, thin
 
     def run_mcmc_sampler(
         self,
         data,
         error,
-        pos,
+        p0,
         n_walkers,
         n_dims,
         n_comp=1,
@@ -2235,7 +2296,7 @@ class HyperfineFitter:
         Args:
             data: Observed data
             error: Observed uncertainty
-            pos: Position for the walkers
+            p0: Initial position guess for the walkers
             n_walkers: Number of emcee walkers
             n_dims: Number of dimensions for the problem
             n_comp: Number of components to fit. Defaults
@@ -2246,6 +2307,7 @@ class HyperfineFitter:
                 is the mp Pool
         """
 
+        # Set up the sampler
         sampler = emcee.EnsembleSampler(
             nwalkers=n_walkers,
             ndim=n_dims,
@@ -2265,19 +2327,48 @@ class HyperfineFitter:
             pool=pool,
         )
 
-        # Simple case where we have the fixed steps
-        if self.emcee_run_method == "fixed":
-            # Run burn-in
+        # START INITIALISATION RUNS
+
+        # The initial positions use data percentage
+        pos = self.initialise_positions(
+            p0=p0,
+            n_walkers=n_walkers,
+            n_dims=n_dims,
+            n_comp=n_comp,
+            data_percentage=True,
+        )
+
+        for i in range(self.n_initialisation):
+
             state = sampler.run_mcmc(
                 pos,
-                self.n_steps // 4,
+                self.n_initialisation_steps,
                 progress=progress,
             )
+
+            # Get where we're at the maximum likelihood for the next
+            # round, but also keep all the positions around in case
+            # we're done
+            max_prob_idx = np.argmax(state.log_prob)
+            pos = copy.deepcopy(state.coords)
+            p0 = pos[max_prob_idx]
+
             sampler.reset()
 
-            # Do the full run
+            # Initialise the walkers for the next run from the maximum
+            # likelihood estimate
+            pos = self.initialise_positions(
+                p0=p0,
+                n_walkers=n_walkers,
+                n_dims=n_dims,
+                n_comp=n_comp,
+                data_percentage=False,
+            )
+
+        # Simple case where we have the fixed steps
+        if self.emcee_run_method == "fixed":
             sampler.run_mcmc(
-                state,
+                pos,
                 self.n_steps,
                 progress=progress,
             )

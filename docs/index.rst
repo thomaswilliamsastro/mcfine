@@ -10,6 +10,7 @@
    :caption: Documentation
 
    install
+   fitting_philosophy
    advanced_topics
    tutorials/single_spectra_fitting
    tutorials/cube_fitting

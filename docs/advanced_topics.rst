@@ -75,7 +75,7 @@ this will use another few parameters:
 .. code-block:: toml
 
    [mcmc]
-   convergence_factor = 100
+   convergence_factor = 10
    tau_change = 0.01
    thin = 0.5
    burn_in = 2
@@ -86,8 +86,8 @@ is ``convergence_factor`` times the autocorrelation length, and the change in th
 by less than a factor of ``tau_change``. To ensure the MCMC doesn't run forever, the maximum number
 of steps is ``max_steps``.
 
-After this, we then use ``thin`` and ``burn_in`` to control how the sampler is pared down for parameter
-estimation. We use a factor of ``burn_in`` time the autocorrelation length to define the burn-in, and then
+After this, for both methods we then use ``thin`` and ``burn_in`` to control how the sampler is pared down for
+parameter estimation. We use a factor of ``burn_in`` time the autocorrelation length to define the burn-in, and then
 thin by a factor of ``thin`` times the autocorrelation length to thin out the chains. For more details on
 these, see the `emcee docs <https://emcee.readthedocs.io/en/stable/tutorials/monitor/>`_.
 

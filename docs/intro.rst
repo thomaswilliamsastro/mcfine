@@ -19,5 +19,5 @@ wizardry in a fully automated, Bayesian way so you can turn your spectra into sc
 McFine uses an iterative approach, fitting and comparing increasingly complex models until it deems them sufficiently
 complicated. It does this through the Bayesian and Akaike Information Criterion, and specifically the change in these
 metrics between models. If given a data cube, it can also use the neighbouring information to attempt a better fit.
-For more details about the philosophy and maths of McFine, have a read of Williams & Watkins (2024). It's quite
-short!
+For more details about the philosophy and maths of McFine, have a read of Williams & Watkins (2024), or see
+:doc:`fitting philosophy <fitting_philosophy>`. They're both quite short!
