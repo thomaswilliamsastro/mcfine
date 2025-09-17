@@ -102,10 +102,10 @@ class HyperfinePlotter(HyperfineFitter):
             sampler = fit_dict["sampler"]
 
             if n_comp == 0:
-                return
-            samples = sampler.get_chain()
+                return True
+
             self.step(
-                samples,
+                sampler,
                 plot_name,
                 n_comp=n_comp,
             )
@@ -155,6 +155,8 @@ class HyperfinePlotter(HyperfineFitter):
                     )
                 )
 
+        return True
+
     def parallel_step(
         self,
         ij,
@@ -183,17 +185,18 @@ class HyperfinePlotter(HyperfineFitter):
             return False
         sampler = fit_dict["sampler"]
 
-        samples = sampler.get_chain()
         cube_plot_name = f"{plot_name}_{i}_{j}"
         self.step(
-            samples,
+            sampler,
             plot_name=cube_plot_name,
             n_comp=n_comp_pix,
         )
 
+        return True
+
     def step(
         self,
-        samples,
+        sampler,
         plot_name="step_plot",
         n_comp=1,
     ):
@@ -205,6 +208,13 @@ class HyperfinePlotter(HyperfineFitter):
             table="plotting",
             key="file_exts",
         )
+
+        # Get samples from the chain
+        samples = sampler.get_chain()
+
+        # And get the nominal "burn-in" range to put on the
+        # plot
+        burn_in, _ = self.get_burn_in_thin(sampler)
 
         # Load up the labels
         labels = []
@@ -239,6 +249,12 @@ class HyperfinePlotter(HyperfineFitter):
                 ax.plot(samples[:, :, ax_i], c=c, alpha=0.3)
                 ax.set_xlim(0, len(samples))
 
+                ax.axvline(
+                    burn_in,
+                    color="k",
+                    linestyle="--",
+                )
+
                 plt.text(
                     0.05,
                     0.9,
@@ -265,6 +281,8 @@ class HyperfinePlotter(HyperfineFitter):
             )
 
         plt.close()
+
+        return True
 
     def plot_corner(
         self,
