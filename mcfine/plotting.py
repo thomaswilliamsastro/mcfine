@@ -329,20 +329,7 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 return
 
-            # If we have the full emcee sampler, prefer that
-            if "sampler" in fit_dict:
-
-                sampler = fit_dict["sampler"]
-                flat_samples = self.get_samples(sampler)
-
-            # Otherwise, pull from the covariance matrix
-            else:
-
-                cov_matrix = fit_dict["cov"]["matrix"]
-                cov_med = fit_dict["cov"]["med"]
-                flat_samples = np.random.multivariate_normal(
-                    cov_med, cov_matrix, size=10000
-                )
+            flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
             self.corner(
                 flat_samples=flat_samples,
@@ -419,20 +406,7 @@ class HyperfinePlotter(HyperfineFitter):
             return
         fit_dict = load_fit_dict(cube_fit_dict_filename)
 
-        # If we have the full emcee sampler, prefer that here
-        if "sampler" in fit_dict:
-
-            sampler = fit_dict["sampler"]
-            flat_samples = self.get_samples(sampler)
-
-        # Otherwise, pull from the covariance matrix
-        else:
-
-            cov_matrix = fit_dict["cov"]["matrix"]
-            cov_med = fit_dict["cov"]["med"]
-            flat_samples = np.random.multivariate_normal(
-                cov_med, cov_matrix, size=10000
-            )
+        flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
         cube_plot_name = f"{plot_name}_{i}_{j}"
         self.corner(flat_samples, plot_name=cube_plot_name, n_comp=n_comp_pix)
@@ -584,20 +558,7 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 flat_samples = None
             else:
-
-                # If we have the sampler, prefer that
-                if "sampler" in fit_dict:
-
-                    sampler = fit_dict["sampler"]
-                    flat_samples = self.get_samples(sampler)
-
-                else:
-
-                    cov_matrix = fit_dict["cov"]["matrix"]
-                    cov_med = fit_dict["cov"]["med"]
-                    flat_samples = np.random.multivariate_normal(
-                        cov_med, cov_matrix, size=10000
-                    )
+                flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
             self.fit(
                 flat_samples=flat_samples,
@@ -693,19 +654,7 @@ class HyperfinePlotter(HyperfineFitter):
         if n_comp_pix > 0:
             fit_dict = load_fit_dict(cube_fit_dict_filename)
 
-            # If we have the full emcee sampler, prefer that here
-            if "sampler" in fit_dict:
-                sampler = fit_dict["sampler"]
-                flat_samples = self.get_samples(sampler)
-
-            # Otherwise fall back to the covariance matrix
-            else:
-
-                cov_matrix = fit_dict["cov"]["matrix"]
-                cov_med = fit_dict["cov"]["med"]
-                flat_samples = np.random.multivariate_normal(
-                    cov_med, cov_matrix, size=10000
-                )
+            flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
         else:
             flat_samples = None

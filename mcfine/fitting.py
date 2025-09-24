@@ -871,7 +871,7 @@ class HyperfineFitter:
         )
         self.keep_covariance = keep_covariance
 
-        # If both are False, frake out
+        # If we're not keeping anything around, freak out
         if not self.keep_sampler and not self.keep_covariance:
             raise ValueError(
                 "You have to keep around at least one of the sampler and covariance matrix!"
@@ -1201,6 +1201,7 @@ class HyperfineFitter:
             sys.exit()
 
         self.parameter_maps = None
+        self.covariance_dict = None
         self.max_n_comp = None
 
     def generate_radex_grid(
@@ -2836,20 +2837,7 @@ class HyperfineFitter:
             return np.zeros([3, len(self.vel)])
         fit_dict = load_fit_dict(cube_sampler_filename)
 
-        # If we have the full emcee sampler, prefer that here
-        if "sampler" in fit_dict:
-
-            sampler = fit_dict["sampler"]
-            flat_samples = self.get_samples(sampler)
-
-        # Otherwise, sample from the covariance matrix
-        else:
-
-            cov_matrix = fit_dict["cov"]["matrix"]
-            cov_med = fit_dict["cov"]["med"]
-            flat_samples = np.random.multivariate_normal(
-                cov_med, cov_matrix, size=10000
-            )
+        flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
         fit_lines = self.get_fits_from_samples(
             flat_samples,
@@ -2866,11 +2854,36 @@ class HyperfineFitter:
 
         return fit_percentiles
 
+    def get_samples_from_fit_dict(self, fit_dict):
+        """Pull out a bunch of samples from a fit dictionary
+
+        Args:
+            fit_dict (dict): Fit dictionary
+        """
+
+        # If we have the full emcee sampler, prefer that here
+        if "sampler" in fit_dict:
+
+            sampler = fit_dict["sampler"]
+            flat_samples = self.get_samples(sampler)
+
+        # Otherwise, sample from the covariance matrix
+        else:
+
+            cov_matrix = fit_dict["cov"]["matrix"]
+            cov_med = fit_dict["cov"]["med"]
+            flat_samples = np.random.multivariate_normal(
+                cov_med, cov_matrix, size=10000
+            )
+
+        return flat_samples
+
     def make_parameter_maps(
         self,
         fit_dict_filename=None,
         n_comp_filename=None,
         maps_filename=None,
+        cov_filename=None,
     ):
         """Make maps of fitted parameters
 
@@ -2881,6 +2894,8 @@ class HyperfineFitter:
                 to None, which will pull from config.toml
             maps_filename (str): Name for the filename of output maps. Defaults
                 to None, which will pull from config.toml
+            cov_filename (str): Name for the filename of output covariance map.
+                Defaults to None, which will pull from config.toml
         """
 
         if self.data_type != "cube":
@@ -2917,6 +2932,15 @@ class HyperfineFitter:
                 logger=self.logger,
             )
 
+        if cov_filename is None:
+            cov_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="make_parameter_maps",
+                key="cov_filename",
+                logger=self.logger,
+            )
+
         n_samples = get_dict_val(
             self.config,
             self.config_defaults,
@@ -2937,6 +2961,7 @@ class HyperfineFitter:
         max_n_comp = int(np.nanmax(n_comp))
 
         parameter_maps = {}
+        cov_dict = {}
         if not os.path.exists(maps_filename) or overwrite:
 
             # Set up arrays in a dictionary
@@ -3003,21 +3028,41 @@ class HyperfineFitter:
 
             for dict_idx, par_dict in enumerate(par_dicts):
 
+                print(par_dict)
+
                 i, j = ij_list[dict_idx][0], ij_list[dict_idx][1]
                 for key in par_dict.keys():
-                    parameter_maps[key][i, j] = par_dict[key]
+                    if key in parameter_maps:
+                        parameter_maps[key][i, j] = par_dict[key]
+
+                # Also pull out covariance, if we keep that around.
+                # This works a little differently since arrays might be
+                # different sizes
+                if self.keep_covariance:
+                    cov_dict[f"{i}, {j}"] = copy.deepcopy(par_dict["cov"])
 
             # Save out
-
             if maps_filename is not None:
                 with open(maps_filename, "wb") as f:
                     pickle.dump(parameter_maps, f)
+
+            if self.keep_covariance:
+                if cov_filename is not None:
+                    with open(cov_filename, "wb") as f:
+                        pickle.dump(cov_dict, f)
 
         else:
             with open(maps_filename, "rb") as f:
                 parameter_maps = pickle.load(f)
 
+            if self.keep_covariance:
+                with open(cov_filename, "rb") as f:
+                    cov_dict = pickle.load(f)
+
         self.parameter_maps = parameter_maps
+        if self.keep_covariance:
+            self.covariance_dict = cov_dict
+
         self.max_n_comp = max_n_comp
 
     def parallel_map_making(
@@ -3046,20 +3091,7 @@ class HyperfineFitter:
             cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
             fit_dict = load_fit_dict(cube_fit_dict_filename)
 
-            # If we have the full emcee sampler, prefer that
-            if "sampler" in fit_dict:
-
-                sampler = fit_dict["sampler"]
-                flat_samples = self.get_samples(sampler)
-
-            # Otherwise, pull from the covariance matrix
-            else:
-
-                cov_matrix = fit_dict["cov"]["matrix"]
-                cov_med = fit_dict["cov"]["med"]
-                flat_samples = np.random.multivariate_normal(
-                    cov_med, cov_matrix, size=10000
-                )
+            flat_samples = self.get_samples_from_fit_dict(fit_dict)
 
             # Pull out median and errors for each parameter and each component
             param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
@@ -3136,9 +3168,14 @@ class HyperfineFitter:
                     ]
                     par_dict[f"{prop}_{n_comp_pix}_err_up"] = param_diffs[1, param_idx]
 
+                # Pull out covariance
+                if self.keep_covariance:
+                    par_dict["cov"] = copy.deepcopy(fit_dict["cov"])
+
         else:
             total_model = np.zeros_like(obs)
 
+        # Add in reduced chisq
         chisq = chi_square(obs, total_model, obs_err)
         deg_freedom = len(obs[~np.isnan(obs)]) - (n_comps_pix * len(self.props))
         par_dict["chisq_red"] = chisq / deg_freedom
