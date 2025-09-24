@@ -138,6 +138,27 @@ can also directly access the `emcee` sampler object:
 
 from there, you can mess around with this as you'd like.
 
+=============================
+Exploring covariance matrices
+=============================
+
+If you set ``keep_covariance`` to True in the config, then
+along with parameter dictionaries a covariance dictionary
+will also be saved out. You can load this in just like
+a fit dictionary, and for each pixel fit (in i, j notation),
+there will be a median array and covariance matrix. From this,
+you can generate samples like:
+
+.. code-block:: python
+
+   import numpy as np
+
+   samples = np.random.multivariate_normal(
+                    par_dict[f"{i}_{j}"]["cov"]["med"],
+                    par_dict[f"{i}_{j}"]["cov"]["matrix"],
+                    size=10000,
+             )
+
 ===================
 Adding another line
 ===================

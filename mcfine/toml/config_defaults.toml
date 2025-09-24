@@ -67,6 +67,7 @@ chunksize = 64
 [make_parameter_maps]
 
 maps_filename = "maps"
+cov_filename = "covariance"
 n_samples = 500
 chunksize = 256
 
