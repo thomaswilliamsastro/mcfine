@@ -2263,17 +2263,24 @@ class HyperfineFitter:
             sampler: emcee sampler
         """
 
-        tau = sampler.get_autocorr_time(tol=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tau = sampler.get_autocorr_time(tol=0)
 
         # Fallback if the autocorrelation time is
         # all NaN
         if np.all(np.isnan(tau)):
-            self.logger.warning("Autocorrelation time is NaN, will use all samples")
+            self.logger.debug("Autocorrelation time is NaN, will use all samples")
             burn_in = 0
-            thin = 0
+            thin = 1
         else:
             burn_in = int(self.burn_in * np.nanmax(tau))
             thin = int(self.thin * np.nanmin(tau))
+
+            # Ensure we don't have a slice step of 0
+            if thin == 0:
+                self.logger.debug("Thin is 0, will round up to 1")
+                thin = 1
 
         return burn_in, thin
 
@@ -3027,8 +3034,6 @@ class HyperfineFitter:
             # Pull the parameters into the arrays
 
             for dict_idx, par_dict in enumerate(par_dicts):
-
-                print(par_dict)
 
                 i, j = ij_list[dict_idx][0], ij_list[dict_idx][1]
                 for key in par_dict.keys():
