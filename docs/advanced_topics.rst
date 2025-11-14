@@ -2,6 +2,31 @@
 Advanced Topics
 ###############
 
+==================================
+Initial fitting using downsampling
+==================================
+
+For complex datasets, doing an initial fit to get a first guess number of components
+can speed up the fitting by a significant amount (15% or more). For this, we offer
+a "downsampling" fitter, which will rebin the data in the x/y axis by a factor (default 10)
+and fit these, before passing those to the full resolution fitting. This can also help to
+improve the fits in areas of low signal-to-noise, but generally keeps the fit quality the same.
+Note that by doing this, the only thing passed to the fitter is the number of components. It will
+still then fit additional components and remove them independently per-spaxel.
+
+.. code-block:: python
+
+  fit_dict_fitting_filename = os.path.join(fit_dir, downsample_fit_dir, fit_dict_filename)
+  n_comp_fitting_filename = os.path.join(fit_dir, downsample_fit_dir, n_comp_filename)
+  likelihood_fitting_filename = os.path.join(fit_dir, downsample_fit_dir, likelihood_filename)
+
+  hf_fitter.downsample_fitter(fit_dict_filename=fit_dict_fitting_filename,
+                              n_comp_filename=n_comp_fitting_filename,
+                              likelihood_filename=likelihood_fitting_filename,
+                              downsample_factor=10,
+                              )
+
+
 ===================
 Different fit types
 ===================

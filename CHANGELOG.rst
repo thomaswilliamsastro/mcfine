@@ -6,6 +6,7 @@ Changelog
 0.3.1 (Unreleased)
 ==================
 
+* Add option to initially fit to downsampled data
 * Fix crash when autocorrelation time is NaN
 * Include iterative initialisation for MCMC runs
 

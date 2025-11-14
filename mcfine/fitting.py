@@ -723,6 +723,55 @@ def ln_prior(
     return 0
 
 
+def downsample(
+    data,
+    chunk_size=10,
+    func=np.nanmean,
+):
+    """Downsample data, given a function
+
+    Args:
+        data: Data to downsample. Should be an image or a
+        chunk_size: Chunk size to downsample to
+        func: Function to downsample using. Defaults to
+            nanmean
+    """
+
+    if data.ndim == 2:
+        ii = np.arange(chunk_size, data.shape[0], chunk_size)
+        jj = np.arange(chunk_size, data.shape[1], chunk_size)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            downsampled_array = np.array(
+                [
+                    [
+                        func(i_split, axis=(0, 1))
+                        for i_split in np.array_split(j_split, ii, axis=0)
+                    ]
+                    for j_split in np.array_split(data, jj, axis=1)
+                ]
+            ).T
+    elif data.ndim == 3:
+        ii = np.arange(chunk_size, data.shape[1], chunk_size)
+        jj = np.arange(chunk_size, data.shape[2], chunk_size)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            downsampled_array = np.array(
+                [
+                    [
+                        func(i_split, axis=(1, 2))
+                        for i_split in np.array_split(j_split, ii, axis=1)
+                    ]
+                    for j_split in np.array_split(data, jj, axis=2)
+                ]
+            ).T
+    else:
+        raise ValueError("Input to downsample should be a 2D or 3D array")
+
+    return downsampled_array
+
+
 class HyperfineFitter:
 
     def __init__(
@@ -779,6 +828,11 @@ class HyperfineFitter:
         self.data = data
         self.vel = vel
         self.error = error
+
+        self.downsampled_data = None
+        self.downsampled_error = None
+        self.downsampled_mask = None
+        self.initial_ncomp = None
 
         with open(CONFIG_DEFAULT_PATH, "rb") as f:
             config_defaults = tomllib.load(f)
@@ -1349,11 +1403,111 @@ class HyperfineFitter:
         global radex_grid
         radex_grid = ds
 
+    def downsample_fitter(
+        self,
+        fit_dict_filename=None,
+        n_comp_filename=None,
+        likelihood_filename=None,
+        downsample_factor=10,
+    ):
+        """Run multicomponent fitter on downsampled data
+
+        This is a light wrapper around multicomponent fitter,
+        but also takes
+
+        Args:
+            fit_dict_filename: Filename to save the fitted emcee walkers
+                to. Defaults to None, which will not save anything
+            n_comp_filename: Filename to save out fitted number of components.
+                Defaults to None, which will not save anything
+            likelihood_filename: Filename to save out likelihood for the
+                best fit. Defaults to None, which will not save anything
+            downsample_factor: Factor to downsample the data down on each spatial axis
+        """
+
+        if self.data_type != "cube":
+            raise ValueError("Can only do downsample fitting on cubes")
+
+        f_name = inspect.currentframe().f_code.co_name
+        overwrite = check_overwrite(self.config, f_name)
+
+        # For data and error, take means
+        downsampled_data = downsample(self.data, chunk_size=downsample_factor)
+        downsampled_error = downsample(self.error, chunk_size=downsample_factor)
+
+        # Mask is a little different. Take sum and reduce to bool
+        downsampled_mask = downsample(
+            self.mask, chunk_size=downsample_factor, func=np.nansum
+        )
+        downsampled_mask[downsampled_mask < 1] = 0
+        downsampled_mask[downsampled_mask >= 1] = 1
+
+        self.downsampled_data = downsampled_data
+        self.downsampled_error = downsampled_error
+        self.downsampled_mask = downsampled_mask
+
+        if n_comp_filename is None:
+            n_comp_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="n_comp_filename",
+                logger=self.logger,
+            )
+        if likelihood_filename is None:
+            likelihood_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="likelihood_filename",
+                logger=self.logger,
+            )
+
+        if not os.path.exists(f"{n_comp_filename}.npy") or overwrite:
+            self.multicomponent_fitter(
+                fit_dict_filename=fit_dict_filename,
+                n_comp_filename=n_comp_filename,
+                likelihood_filename=likelihood_filename,
+                data_type="downsampled",
+            )
+
+        # Get n_comp out and sample back to the original grid
+        n_comp = np.load(f"{n_comp_filename}.npy")
+
+        # Get indices for the downsampled and upsampled arrays
+        i_us = np.arange(self.data.shape[1])
+        j_us = np.arange(self.data.shape[2])
+        i_ds = np.arange(downsample_factor, self.data.shape[1], downsample_factor)
+        j_ds = np.arange(downsample_factor, self.data.shape[2], downsample_factor)
+
+        n_comp_upsampled = np.zeros(self.data.shape[1:])
+
+        i_split = np.array_split(i_us, i_ds)
+        j_split = np.array_split(j_us, j_ds)
+
+        for i_idx, i in enumerate(i_split):
+            for j_idx, j in enumerate(j_split):
+
+                # Get min/max indices to map back to the array
+                i_low = np.min(i)
+                i_high = np.max(i)
+                j_low = np.min(j)
+                j_high = np.max(j)
+
+                n_comp_upsampled[i_low : i_high + 1, j_low : j_high + 1] = n_comp[
+                    i_idx, j_idx
+                ]
+
+        self.initial_ncomp = copy.deepcopy(n_comp_upsampled)
+
+        return True
+
     def multicomponent_fitter(
         self,
         fit_dict_filename=None,
         n_comp_filename=None,
         likelihood_filename=None,
+        data_type="original",
     ):
         """Run the multicomponent fitter
 
@@ -1369,7 +1523,11 @@ class HyperfineFitter:
                 Defaults to None, which will not save anything
             likelihood_filename: Filename to save out likelihood for the
                 best fit. Defaults to None, which will not save anything
+            data_type: Data type to fit. Can be either "original" or "downsampled"
         """
+
+        if data_type not in ["original", "downsampled"]:
+            raise ValueError("Data type to fit should be original or downsampled")
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
@@ -1409,11 +1567,27 @@ class HyperfineFitter:
             logger=self.logger,
         )
 
+        if data_type == "original":
+            data = copy.deepcopy(self.data)
+            error = copy.deepcopy(self.error)
+            mask = copy.deepcopy(self.mask)
+        elif data_type == "downsampled":
+            data = copy.deepcopy(self.downsampled_data)
+            error = copy.deepcopy(self.downsampled_error)
+            mask = copy.deepcopy(self.downsampled_mask)
+
+            # If somehow we've broken the logic here, then freak out
+            if data is None:
+                raise ValueError(
+                    "Must run data downsampling if you want to fit downsampled data"
+                )
+
+        else:
+            raise ValueError("Data type to fit should be original or downsampled")
+
         if self.data_type == "spectrum":
 
             if not os.path.exists(f"{fit_dict_filename}.pkl") or overwrite:
-                data = self.data
-                error = self.error
 
                 n_comp, likelihood, sampler, cov_matrix, cov_med = (
                     self.delta_bic_looper(
@@ -1465,7 +1639,7 @@ class HyperfineFitter:
                 )
 
             if not os.path.exists(f"{n_comp_filename}.npy") or overwrite:
-                n_comp = np.zeros([self.data.shape[1], self.data.shape[2]])
+                n_comp = np.zeros([data.shape[1], data.shape[2]])
             else:
                 n_comp = np.load(f"{n_comp_filename}.npy")
             if not os.path.exists(f"{likelihood_filename}.npy") or overwrite:
@@ -1475,9 +1649,9 @@ class HyperfineFitter:
 
             ij_list = [
                 (i, j)
-                for i in range(self.data.shape[1])
-                for j in range(self.data.shape[2])
-                if self.mask[i, j] != 0
+                for i in range(data.shape[1])
+                for j in range(data.shape[2])
+                if mask[i, j] != 0
             ]
 
             self.logger.info(f"Fitting using {self.n_cores} cores")
@@ -1489,6 +1663,7 @@ class HyperfineFitter:
                             partial(
                                 self.parallel_fitting,
                                 fit_dict_filename=fit_dict_filename,
+                                data_type=data_type,
                                 save=save,
                                 overwrite=overwrite,
                             ),
@@ -1511,6 +1686,7 @@ class HyperfineFitter:
         self,
         ij,
         fit_dict_filename="fit_dict",
+        data_type="original",
         save=True,
         overwrite=False,
     ):
@@ -1523,23 +1699,46 @@ class HyperfineFitter:
             ij (tuple): tuple containing (i, j) coordinates of the pixel to fit.
             fit_dict_filename (str): Base filename for MCMC ft pickle. Will append coordinates on afterwards. Defaults
                 to fit_dict.
+            data_type: Data type to fit. Can be either "original" or "downsampled"
             save (bool): Save out files? Defaults to True.
             overwrite (bool): Overwrite existing files? Defaults to False.
 
         Returns:
             Number of fitted components and the best-fit likelihood.
-
         """
+
+        if data_type not in ["original", "downsampled"]:
+            raise ValueError("Data type to fit should be original or downsampled")
 
         i = ij[0]
         j = ij[1]
 
         cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}"
 
+        if data_type == "original":
+            data = copy.deepcopy(self.data)
+            error = copy.deepcopy(self.error)
+        elif data_type == "downsampled":
+            data = copy.deepcopy(self.downsampled_data)
+            error = copy.deepcopy(self.downsampled_error)
+
+            # If somehow we've broken the logic here, then freak out
+            if data is None:
+                raise ValueError(
+                    "Must run data downsampling if you want to fit downsampled data"
+                )
+
+        else:
+            raise ValueError("Data type to fit should be original or downsampled")
+
         if not os.path.exists(f"{cube_fit_dict_filename}.pkl") or overwrite:
             self.logger.debug(f"Fitting {i}, {j}")
-            data = self.data[:, i, j]
-            error = self.error[:, i, j]
+            data = data[:, i, j]
+            error = error[:, i, j]
+
+            initial_ncomp = None
+            if self.initial_ncomp is not None:
+                initial_ncomp = self.initial_ncomp[i, j]
 
             # Limit to a single core to avoid weirdness
             with threadpool_limits(limits=1, user_api=None):
@@ -1547,6 +1746,7 @@ class HyperfineFitter:
                     self.delta_bic_looper(
                         data=data,
                         error=error,
+                        initial_ncomp=initial_ncomp,
                     )
                 )
 
@@ -1588,6 +1788,7 @@ class HyperfineFitter:
         self,
         data,
         error,
+        initial_ncomp=None,
         save=False,
         overwrite=True,
         progress=False,
@@ -1601,6 +1802,8 @@ class HyperfineFitter:
         Args:
             data: Observed data
             error: Observed error
+            initial_ncomp: Initial guess at number of components.
+                Defaults to None.
             save: Whether to save out or not, defaults to False
             overwrite: Whether to overwrite existing fits. Defaults to False
             progress: Whether to display progress bars or not. Defaults to False
@@ -1609,8 +1812,6 @@ class HyperfineFitter:
             fitted number of components, likelihood, and the emcee sampler
         """
 
-        # We start with a zero component model, i.e. a flat line
-
         delta_bic = np.inf
         delta_aic = np.inf
         sampler_old = None
@@ -1618,22 +1819,62 @@ class HyperfineFitter:
         sampler = None
         cov_matrix = None
         cov_med = None
-        n_comp = 0
         prop_len = len(self.props)
         ln_m = np.log(len(data[~np.isnan(data)]))
-        likelihood = ln_like(
-            theta=0,
-            intensity=data,
-            intensity_err=error,
-            vel=self.vel,
-            strength_lines=self.strength_lines,
-            v_lines=self.v_lines,
-            props=self.props,
-            n_comp=n_comp,
-            fit_type=self.fit_type,
-        )
-        bic = -2 * likelihood
-        aic = -2 * likelihood
+
+        if initial_ncomp is None:
+            # We start with a zero component model, i.e. a flat line
+            n_comp = 0
+            likelihood = ln_like(
+                theta=0,
+                intensity=data,
+                intensity_err=error,
+                vel=self.vel,
+                strength_lines=self.strength_lines,
+                v_lines=self.v_lines,
+                props=self.props,
+                n_comp=n_comp,
+                fit_type=self.fit_type,
+            )
+            bic = -2 * likelihood
+            aic = -2 * likelihood
+
+        else:
+            # Start with an initial guess of component numbers
+            n_comp = int(initial_ncomp)
+            k = n_comp * prop_len
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sampler = self.run_mcmc(
+                    data,
+                    error,
+                    n_comp=n_comp,
+                    save=save,
+                    overwrite=overwrite,
+                    progress=progress,
+                )
+
+            # Calculate max likelihood parameters and BIC
+            flat_samples = self.get_samples(sampler)
+            parameter_median = np.nanmedian(
+                flat_samples,
+                axis=0,
+            )
+            likelihood = ln_like(
+                theta=parameter_median,
+                intensity=data,
+                intensity_err=error,
+                vel=self.vel,
+                strength_lines=self.strength_lines,
+                v_lines=self.v_lines,
+                props=self.props,
+                n_comp=n_comp,
+                fit_type=self.fit_type,
+            )
+
+            # Calculate BIC and AIC
+            bic = k * ln_m - 2 * likelihood
+            aic = 2 * k - 2 * likelihood
 
         while delta_bic > self.delta_bic_cutoff or delta_aic > self.delta_aic_cutoff:
             # Store the previous BIC and sampler, since we need them later
@@ -2347,7 +2588,6 @@ class HyperfineFitter:
         )
 
         for i in range(self.n_initialisation):
-
             state = sampler.run_mcmc(
                 pos,
                 self.n_initialisation_steps,
