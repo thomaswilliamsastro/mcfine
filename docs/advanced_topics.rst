@@ -218,3 +218,9 @@ put (in the shell):
     setenv GOTO_NUM_THREADS 1
 
 or the equivalent EXPORT call, depending on the shell you use.
+
+For macOS >= 10.13, you may also need to set
+
+.. code-block:: shell
+
+    OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES

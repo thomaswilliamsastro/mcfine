@@ -10,9 +10,10 @@ import tomllib
 import warnings
 from functools import partial
 
-import astropy.units as u
 import emcee
 import numpy as np
+import xarray
+from astropy import units as u
 from lmfit import minimize, Parameters
 from scipy.interpolate import RegularGridInterpolator
 from specutils import Spectrum
@@ -28,13 +29,27 @@ try:
 except ModuleNotFoundError:
     pass
 
+from .emcee_funcs import (
+    get_samples,
+    get_samples_from_fit_dict,
+)
+from .fitting_funcs import (
+    chi_square,
+    ln_prior,
+)
 from .line_info import (
     allowed_lines,
     transition_lines,
     freq_lines,
-    strength_lines,
-    v_lines,
+    strength_lines_dict,
+    v_lines_dict,
 )
+from .line_shape_funcs import (
+    hyperfine_structure_lte,
+    hyperfine_structure_pure_gauss,
+    hyperfine_structure_radex,
+)
+from .radex_funcs import get_nearest_values
 from .utils import (
     get_dict_val,
     check_overwrite,
@@ -43,307 +58,36 @@ from .utils import (
     CONFIG_DEFAULT_PATH,
     LOCAL_DEFAULT_PATH,
 )
+from .vars import (
+    T_BACKGROUND,
+    ALLOWED_LMFIT_METHODS,
+    ALLOWED_EMCEE_RUN_METHODS,
+    ALLOWED_FIT_TYPES,
+    ALLOWED_FIT_METHODS,
+)
 
-T_BACKGROUND = 2.73
 
-ALLOWED_LMFIT_METHODS = [
-    "default",
-    "iterative",
-]
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(asctime)s - %(name)s - %(funcName)s - %(message)s",
+)
+logger = logging.getLogger("mcfine")
 
-ALLOWED_EMCEE_RUN_METHODS = [
-    "fixed",
-    "adaptive",
-]
+# Define global variables for potentially huge arrays, and various config values
+glob_data = np.array([])
+glob_error = np.array([])
+glob_vel = np.array([])
 
-ALLOWED_FIT_TYPES = [
-    "lte",
-    "pure_gauss",
-    "radex",
-]
+glob_downsampled_data = np.array([])
+glob_downsampled_error = np.array([])
 
-ALLOWED_FIT_METHODS = [
-    "mcmc",
-    "leastsq",
-]
+glob_initial_ncomp = np.array([])
 
-radex_grid = {}
+radex_grid = xarray.Dataset()
+
+glob_config = {}
 
 mp.set_start_method("fork")
-
-
-def get_nearest_value(
-    data,
-    value,
-):
-    """Get the nearest value in a dataset
-
-    Args:
-        data: array of values to hunt through
-        value: value to find nearest in data to
-
-    Returns:
-        Nearest value
-    """
-
-    # Find the nearest below and above
-    diff = data - value
-    less = np.where(diff <= 0)
-    greater = np.where(diff >= 0)
-
-    # Get the position and value for above and below. If we're at the edge but somehow this doesn't work, just
-    # go for the lowest or highest values
-    if len(less[0]) == 0:
-        nearest_below = data[0]
-    else:
-        nearest_below_idx = np.argsort(np.abs(diff[less]))[0]
-        nearest_below = data[less][nearest_below_idx]
-
-    if len(greater[0]) == 0:
-        nearest_above = data[-1]
-    else:
-        nearest_above_idx = np.argsort(diff[greater])[0]
-        nearest_above = data[greater][nearest_above_idx]
-
-    nearest_value = np.array([nearest_below, nearest_above])
-
-    # If we're actually choosing a grid value, just return that singular value
-    if np.diff(nearest_value) == 0:
-        nearest_value = nearest_value[0]
-
-    return nearest_value
-
-
-def get_nearest_values(
-    dataset,
-    keys,
-    values,
-):
-    """Function to parallelise get_nearest_value
-
-    Args:
-        dataset (dict): Dataset to hunt through
-        keys (list): List of keys to search with
-        values (list): List of values to find in the dataset
-
-    Returns
-        list of the nearest values
-    """
-
-    nearest_values_list = [
-        get_nearest_value(dataset[keys[i]].values, values[i])
-        for i in range(len(values))
-    ]
-
-    return nearest_values_list
-
-
-def gaussian(
-    x,
-    amp,
-    centre,
-    width,
-):
-    """Evaluate a Gaussian on a 1D grid.
-
-    Calculates a Gaussian, using :math:`f(x) = A \\exp[-0.5(x - \\mu)^2/\\sigma^2]`.
-
-    Args:
-        x (np.ndarray): Grid to calculate Gaussian on.
-        amp (float or np.ndarray): Height(s) of curve peak(s), :math:`A`.
-        centre (float or np.ndarray): Peak centre(s), :math:`\\mu`.
-        width (float or np.ndarray): Standard deviation(s), :math:`\\sigma`.
-
-    Returns:
-        np.ndarray: Gaussian model array
-    """
-
-    y = amp * np.exp(-((x - centre) ** 2) / (2 * width**2))
-    return y
-
-
-def residual(
-    observed,
-    model,
-    observed_error=None,
-):
-    """Calculate standard residual.
-
-    If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})/{\\rm error}`. Else the sum of
-    :math:`({\\rm obs}-{\\rm model})/{\\rm model}`.
-
-    Args:
-        observed (np.ndarray): Observed values.
-        model (np.ndarray): Model values.
-        observed_error (float or np.ndarray): The error in the observed values. Defaults to None.
-
-    Returns:
-        float: The residual value.
-
-    """
-
-    if observed_error is not None:
-        res = (observed - model) / observed_error
-    else:
-        res = (observed - model) / model
-
-    return res
-
-
-def chi_square(
-    observed,
-    model,
-    observed_error=None,
-):
-    """Calculate standard chi-square.
-
-    If errors are provided, then this is the sum of :math:`({\\rm obs}-{\\rm model})^2/{\\rm error}^2`. Else the sum of
-    :math:`({\\rm obs}-{\\rm model})^2/{\\rm model}^2`.
-
-    Args:
-        observed (np.ndarray): Observed values.
-        model (np.ndarray): Model values.
-        observed_error (float or np.ndarray): The error in the observed values. Defaults to None.
-
-    Returns:
-        float: The chi-square value.
-
-    """
-
-    res = residual(observed, model, observed_error)
-    chisq = np.nansum(res**2)
-
-    return chisq
-
-
-def hyperfine_structure_lte(
-    t_ex,
-    tau,
-    v_centre,
-    line_width,
-    strength_lines,
-    v_lines,
-    vel,
-    return_hyperfine_components=False,
-    log_tau=True,
-):
-    """Create hyperfine intensity profile.
-
-    Takes line strengths and relative velocity centres, along with excitation temperature and optical depth to
-    produce a hyperfine intensity profile.
-
-    Args:
-        t_ex (float): Excitation temperature (K).
-        tau (float): Total optical depth of the line.
-        v_centre (float): Central velocity of the strongest component (km/s).
-        strength_lines (np.ndarray): Array of relative line strengths
-        v_lines (np.ndarray): Array of relative velocity shifts for the lines (km/s)
-        vel (np.ndarray): Velocity array (km/s)
-        line_width (float): Width of components (assumed to be the same for each hyperfine component; km/s).
-        return_hyperfine_components (bool): Return the intensity for each hyperfine component. Defaults to False.
-        log_tau (bool): If True, will assume tau is in a logarithmic scale. Else is linear. Defaults to True.
-
-    Returns:
-        Intensity for each individual hyperfine component (if `return_hyperfine_components` is True), and the total
-            intensity for all components
-    """
-
-    if log_tau:
-        strength = np.exp(tau) * strength_lines
-    else:
-        strength = tau * strength_lines
-
-    tau_components = gaussian(
-        vel[:, np.newaxis], strength, v_lines + v_centre, line_width
-    )
-
-    total_tau = np.nansum(tau_components, axis=-1)
-    intensity_total = (1 - np.exp(-total_tau)) * (t_ex - T_BACKGROUND)
-
-    if not return_hyperfine_components:
-        return intensity_total
-    else:
-        intensity_components = (1 - np.exp(-tau_components)) * (t_ex - T_BACKGROUND)
-        return intensity_components, intensity_total
-
-
-def hyperfine_structure_pure_gauss(
-    t,
-    v_centre,
-    line_width,
-    strength_lines,
-    v_lines,
-    vel,
-    return_hyperfine_components=False,
-):
-    """Create hyperfine intensity profile for a pure Gaussian profile.
-
-    Takes line strengths and relative velocity centres, along with peak temperature to
-    produce a hyperfine intensity profile.
-
-    Args:
-        t (float): Line temperature (K).
-        v_centre (float): Central velocity of the strongest component (km/s).
-        strength_lines (np.ndarray): Array of relative line strengths
-        v_lines (np.ndarray): Array of relative velocity shifts for the lines (km/s)
-        vel (np.ndarray): Velocity array (km/s)
-        line_width (float): Width of components (assumed to be the same for each hyperfine component; km/s).
-        return_hyperfine_components (bool): Return the intensity for each hyperfine component. Defaults to False.
-
-    Returns:
-        Intensity for each individual hyperfine component (if `return_hyperfine_components` is True), and the total
-            intensity for all components
-    """
-
-    intensity_components = gaussian(
-        vel[:, np.newaxis], t * strength_lines, v_lines + v_centre, line_width
-    )
-
-    intensity_total = np.nansum(intensity_components, axis=-1)
-
-    if not return_hyperfine_components:
-        return intensity_total
-    else:
-        return intensity_components, intensity_total
-
-
-def hyperfine_structure_radex(
-    t_ex,
-    tau,
-    v_centre,
-    line_width,
-    v_lines,
-    vel,
-    return_hyperfine_components=False,
-):
-    """Create hyperfine intensity profile using RADEX.
-
-    Takes line strengths and relative velocity centres calculated with RADEX, and produces a spectrum.
-
-    Args:
-        t_ex (float): Excitation temperature (K).
-        tau (float): Total optical depth of the line.
-        v_centre (float): Central velocity of the strongest component (km/s).
-        line_width (float): Width of components (assumed to be the same for each hyperfine component; km/s).
-        v_lines (float): Velocity of the various components (km/s).
-        vel (np.ndarray): Velocity array (km/s)
-        return_hyperfine_components (bool): Return the intensity for each hyperfine component. Defaults to False.
-
-    Returns:
-        Intensity for each individual hyperfine component (if `return_hyperfine_components` is True), and the total
-            intensity for all components
-    """
-
-    tau_components = gaussian(vel[:, np.newaxis], tau, v_lines + v_centre, line_width)
-
-    intensity_components = (1 - np.exp(-tau_components)) * (t_ex - T_BACKGROUND)
-
-    intensity_total = np.nansum(intensity_components, axis=-1)
-
-    if not return_hyperfine_components:
-        return intensity_total
-    else:
-        return intensity_components, intensity_total
 
 
 def multiple_components(
@@ -363,7 +107,8 @@ def multiple_components(
     Args:
         theta: [t_ex, tau, vel, vel_width] for each component. Should have a length of 4*`n_comp`
         vel: velocity array
-        strength_lines (np.ndarray): Array for relative line strengths
+        strength_lines: Array for relative line strengths
+        v_lines: Array of relative velocity shifts for the lines
         props: List of properties for the line profiles
         n_comp (int): Number of distinct components to calculate intensities for
         fit_type (str): Should be one of ALLOWED_FIT_TYPES. Defaults to 'lte'
@@ -458,7 +203,7 @@ def radex_grid_interp(
     Args:
         theta (list): property values
         qn_ul (list): Names for the transitions
-        labels (list): Labels for proeprties
+        labels (list): Labels for properties
 
     Returns:
         tau and t_ex
@@ -560,9 +305,9 @@ def initial_lmfit(
         log_tau=log_tau,
     )
     diff = intensity - intensity_model
-    residual = diff / intensity_err
+    residuals = diff / intensity_err
 
-    return residual
+    return residuals
 
 
 def ln_like(
@@ -671,58 +416,6 @@ def ln_prob(
     return lp + like
 
 
-def ln_prior(
-    theta,
-    vel,
-    props,
-    bounds,
-    n_comp=1,
-):
-    """Apply flat priors to the emcee fitting
-
-    This also ensures any velocity components are strictly increasing,
-    to avoid degeneracies there
-
-    Args:
-        theta: Parameters for the fit
-        vel: Observed velocity
-        props: List of properties being fit
-        bounds: Bounds on parameters
-        n_comp: Number of components to fit. Defaults to 1
-
-    Returns:
-        0 if within bounds, -infinity otherwise
-
-    """
-
-    prop_len = len(props)
-
-    for prop in range(prop_len):
-
-        values = np.array([theta[prop_len * i + prop] for i in range(n_comp)])
-
-        if not np.logical_and(
-            bounds[prop][0] <= values, values <= bounds[prop][1]
-        ).all():
-            return -np.inf
-
-    if n_comp > 1:
-
-        dv = np.abs(np.nanmedian(np.diff(vel)))
-
-        # Insist on monotonically increasing velocity components
-        v_idx = np.where(np.asarray(props) == "v")[0][0]
-
-        vels = np.array([theta[prop_len * i + v_idx] for i in range(n_comp)])
-        vel_diffs = np.diff(vels)
-
-        # Make sure components are separated by at least one channel
-        if np.any(vel_diffs < dv):
-            return -np.inf
-
-    return 0
-
-
 def downsample(
     data,
     chunk_size=10,
@@ -772,6 +465,1167 @@ def downsample(
     return downsampled_array
 
 
+def parallel_fitting(
+    ij,
+    fit_dict_filename="fit_dict",
+    data_type="original",
+    save=True,
+    overwrite=False,
+):
+    """Parallel function for MCMC fitting.
+
+    Wraps up the MCMC fitting to pass off to multiple cores. Because of overheads, it's easier to farm out multiple
+    fits to multiple cores, rather than run the MCMC with multiple threads.
+
+    Args:
+        ij (tuple): tuple containing (i, j) coordinates of the pixel to fit.
+        fit_dict_filename (str): Base filename for MCMC ft pickle. Will append coordinates on afterward. Defaults
+            to fit_dict.
+        data_type: Data type to fit. Can be either "original" or "downsampled"
+        save (bool): Save out files? Defaults to True.
+        overwrite (bool): Overwrite existing files? Defaults to False.
+
+    Returns:
+        Number of fitted components and the best-fit likelihood.
+    """
+
+    if data_type not in ["original", "downsampled"]:
+        raise ValueError("Data type to fit should be original or downsampled")
+
+    i = ij[0]
+    j = ij[1]
+
+    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}"
+
+    if not os.path.exists(f"{cube_fit_dict_filename}.pkl") or overwrite:
+        logger.debug(f"Fitting {i}, {j}")
+
+        if data_type == "original":
+            data = glob_data[:, i, j]
+            error = glob_error[:, i, j]
+        elif data_type == "downsampled":
+            data = glob_downsampled_data[:, i, j]
+            error = glob_downsampled_error[:, i, j]
+        else:
+            raise ValueError("Data type to fit should be original or downsampled")
+
+        # If somehow we've broken the logic here, then freak out
+        if data.size == 0:
+            raise ValueError("No data found!")
+
+        initial_ncomp = None
+        if glob_initial_ncomp.size != 0:
+            initial_ncomp = glob_initial_ncomp[i, j]
+
+        # Limit to a single core to avoid weirdness
+        with threadpool_limits(limits=1, user_api=None):
+            n_comp, likelihood, sampler, cov_matrix, cov_med = delta_bic_looper(
+                data=data,
+                error=error,
+                initial_ncomp=initial_ncomp,
+            )
+
+        if save:
+
+            fit_dict = {
+                "n_comp": n_comp,
+                "likelihood": likelihood,
+                "sampler": None,
+                "cov": {},
+            }
+            if glob_config["keep_sampler"]:
+                fit_dict["sampler"] = sampler
+            else:
+                fit_dict.pop("sampler")
+
+            if glob_config["keep_covariance"]:
+                fit_dict["cov"] = {
+                    "matrix": cov_matrix,
+                    "med": cov_med,
+                }
+            else:
+                fit_dict.pop("cov")
+
+            save_fit_dict(fit_dict, f"{cube_fit_dict_filename}.pkl")
+
+    else:
+
+        fit_dict = load_fit_dict(f"{cube_fit_dict_filename}.pkl")
+
+        n_comp = fit_dict["n_comp"]
+        likelihood = fit_dict["likelihood"]
+
+    logger.debug(f"N components: {n_comp}, likelihood: {likelihood:.2f}")
+
+    return n_comp, likelihood
+
+
+def delta_bic_looper(
+    data,
+    error,
+    initial_ncomp=None,
+    save=False,
+    overwrite=True,
+    progress=False,
+):
+    """Increase spectral complexity until we hit diminishing returns
+
+    This will iteratively build up the spectral model one component
+    at a time, before looping backwards to remove the weaker components
+    which might just be fits to the noise
+
+    Args:
+        data: Observed data
+        error: Observed error
+        initial_ncomp: Initial guess at number of components.
+            Defaults to None.
+        save: Whether to save out or not, defaults to False
+        overwrite: Whether to overwrite existing fits. Defaults to False
+        progress: Whether to display progress bars or not. Defaults to False
+
+    Returns:
+        fitted number of components, likelihood, and the emcee sampler
+    """
+
+    delta_bic = np.inf
+    delta_aic = np.inf
+    sampler_old = None
+    likelihood_old = None
+    sampler = None
+    cov_matrix = None
+    cov_med = None
+    prop_len = len(glob_config["props"])
+    ln_m = np.log(len(data[~np.isnan(data)]))
+
+    if initial_ncomp is None:
+        # We start with a zero component model, i.e. a flat line
+        n_comp = 0
+        likelihood = ln_like(
+            theta=0,
+            intensity=data,
+            intensity_err=error,
+            vel=glob_vel,
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            props=glob_config["props"],
+            n_comp=n_comp,
+            fit_type=glob_config["fit_type"],
+        )
+        bic = -2 * likelihood
+        aic = -2 * likelihood
+
+    else:
+        # Start with an initial guess of component numbers
+        n_comp = int(initial_ncomp)
+        k = n_comp * prop_len
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sampler = run_mcmc(
+                data,
+                error,
+                n_comp=n_comp,
+                save=save,
+                overwrite=overwrite,
+                progress=progress,
+            )
+
+        # Calculate max likelihood parameters and BIC
+        flat_samples = get_samples(
+            sampler,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+        parameter_median = np.nanmedian(
+            flat_samples,
+            axis=0,
+        )
+        likelihood = ln_like(
+            theta=parameter_median,
+            intensity=data,
+            intensity_err=error,
+            vel=glob_vel,
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            props=glob_config["props"],
+            n_comp=n_comp,
+            fit_type=glob_config["fit_type"],
+        )
+
+        # Calculate BIC and AIC
+        bic = k * ln_m - 2 * likelihood
+        aic = 2 * k - 2 * likelihood
+
+    while (
+        delta_bic > glob_config["delta_bic_cutoff"]
+        or delta_aic > glob_config["delta_aic_cutoff"]
+    ):
+        # Store the previous BIC and sampler, since we need them later
+        bic_old = bic
+        aic_old = aic
+        sampler_old = sampler
+        likelihood_old = likelihood
+
+        # Increase the number of components, refit
+        n_comp += 1
+        k = n_comp * prop_len
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sampler = run_mcmc(
+                data,
+                error,
+                n_comp=n_comp,
+                save=save,
+                overwrite=overwrite,
+                progress=progress,
+            )
+
+        # Calculate max likelihood parameters and BIC
+        flat_samples = get_samples(
+            sampler,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+        parameter_median = np.nanmedian(
+            flat_samples,
+            axis=0,
+        )
+        likelihood = ln_like(
+            theta=parameter_median,
+            intensity=data,
+            intensity_err=error,
+            vel=glob_vel,
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            props=glob_config["props"],
+            n_comp=n_comp,
+            fit_type=glob_config["fit_type"],
+        )
+
+        # Calculate BIC and AIC
+        bic = k * ln_m - 2 * likelihood
+        delta_bic = bic_old - bic
+
+        aic = 2 * k - 2 * likelihood
+        delta_aic = aic_old - aic
+
+    sampler = sampler_old
+    likelihood = likelihood_old
+    n_comp -= 1
+
+    # Now loop backwards, iteratively remove the weakest component and refit. Only if we have a >0 order fit!
+
+    if n_comp > 0:
+        max_back_loops = n_comp
+
+        for i in range(max_back_loops):
+            flat_samples = get_samples(
+                sampler,
+                burn_in_frac=glob_config["burn_in"],
+                thin_frac=glob_config["thin"],
+            )
+            parameter_median = np.nanmedian(
+                flat_samples,
+                axis=0,
+            )
+
+            if glob_config["fit_type"] == "lte":
+                line_intensities = np.array(
+                    [
+                        hyperfine_structure_lte(
+                            *parameter_median[prop_len * i : prop_len * i + prop_len],
+                            strength_lines=glob_config["strength_lines"],
+                            v_lines=glob_config["v_lines"],
+                            vel=glob_vel,
+                        )
+                        for i in range(n_comp)
+                    ]
+                )
+
+            elif glob_config["fit_type"] == "pure_gauss":
+                line_intensities = np.array(
+                    [
+                        hyperfine_structure_pure_gauss(
+                            *parameter_median[prop_len * i : prop_len * i + prop_len],
+                            strength_lines=glob_config["strength_lines"],
+                            v_lines=glob_config["v_lines"],
+                            vel=glob_vel,
+                        )
+                        for i in range(n_comp)
+                    ]
+                )
+
+            elif glob_config["fit_type"] == "radex":
+                line_intensities = np.array(
+                    [
+                        hyperfine_structure_radex(
+                            *parameter_median[prop_len * i : prop_len * i + prop_len],
+                            v_lines=glob_config["v_lines"],
+                            vel=glob_vel,
+                        )
+                        for i in range(n_comp)
+                    ]
+                )
+            else:
+                logger.warning(f"Fit type {glob_config['fit_type']} not understood!")
+                sys.exit()
+
+            integrated_intensities = np.trapezoid(line_intensities, x=glob_vel, axis=-1)
+            component_order = np.argsort(integrated_intensities)
+
+            bic_old = bic
+            aic_old = aic
+            sampler_old = sampler
+            likelihood_old = likelihood
+
+            # Remove the weakest component
+            n_comp -= 1
+
+            if n_comp == 0:
+                likelihood = ln_like(
+                    theta=0,
+                    intensity=data,
+                    intensity_err=error,
+                    vel=glob_vel,
+                    strength_lines=glob_config["strength_lines"],
+                    v_lines=glob_config["v_lines"],
+                    props=glob_config["props"],
+                    n_comp=n_comp,
+                    fit_type=glob_config["fit_type"],
+                )
+                bic = -2 * likelihood
+            else:
+                k = n_comp * prop_len
+                idx_to_delete = range(
+                    prop_len * component_order[0],
+                    prop_len * component_order[0] + prop_len,
+                )
+                p0 = np.delete(parameter_median, idx_to_delete)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    sampler = run_mcmc(
+                        data,
+                        error,
+                        n_comp=n_comp,
+                        save=save,
+                        overwrite=overwrite,
+                        progress=progress,
+                        p0_fit=p0,
+                    )
+
+                # Calculate max likelihood parameters and BIC
+                flat_samples = get_samples(
+                    sampler,
+                    burn_in_frac=glob_config["burn_in"],
+                    thin_frac=glob_config["thin"],
+                )
+                parameter_median = np.nanmedian(flat_samples, axis=0)
+                likelihood = ln_like(
+                    theta=parameter_median,
+                    intensity=data,
+                    intensity_err=error,
+                    vel=glob_vel,
+                    strength_lines=glob_config["strength_lines"],
+                    v_lines=glob_config["v_lines"],
+                    props=glob_config["props"],
+                    n_comp=n_comp,
+                    fit_type=glob_config["fit_type"],
+                )
+                bic = k * ln_m - 2 * likelihood
+                aic = 2 * k - 2 * likelihood
+
+            delta_bic = bic_old - bic
+            delta_aic = aic_old - aic
+
+            # If removing and refitting doesn't significantly improve things, then just jump out of here
+            if (
+                delta_bic < glob_config["delta_bic_cutoff"]
+                and delta_aic < glob_config["delta_aic_cutoff"]
+            ):
+                break
+
+        sampler = sampler_old
+        likelihood = likelihood_old
+        n_comp += 1
+
+    # Finally, calculate the covariance matrix and the parameter medians.
+    # This is only defined if we end up with a 0-component fit
+    if sampler is not None:
+        samples = get_samples(
+            sampler,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+        cov_matrix = np.cov(samples.T)
+        cov_med = np.median(samples, axis=0)
+
+    return n_comp, likelihood, sampler, cov_matrix, cov_med
+
+
+def run_mcmc(
+    data,
+    error,
+    n_comp=1,
+    save=True,
+    overwrite=False,
+    progress=False,
+    fit_dict_filename="fit_dict.pkl",
+    p0_fit=None,
+):
+    """Run emcee to get a fit out
+
+    Args:
+        data: Observed data
+        error: Observed uncertainty
+        n_comp: Number of components to fit. Defaults to 1
+        save: Whether to save the sampler out. Defaults to True
+        overwrite: Whether to overwrite existing fit. Defaults to False
+        progress: Whether to display progress bar. Defaults to False
+        fit_dict_filename: Name for the sampler. Defaults to fit_dict.pkl
+        p0_fit: Initial guess for the fit. Defaults to None, which will
+            use some basic parameters that are likely to be suboptimal
+    """
+
+    prop_len = len(glob_config["props"])
+
+    bounds = glob_config["bounds"] * n_comp
+
+    if not os.path.exists(fit_dict_filename) or overwrite:
+
+        if p0_fit is None:
+
+            vel_idx = np.where(np.array(glob_config["props"]) == "v")[0][0]
+
+            # Pull in any relevant kwargs
+            kwargs = {}
+
+            for config_dict in [glob_config["config_defaults"], glob_config["config"]]:
+                if "lmfit" in config_dict:
+                    for key in config_dict["lmfit"]:
+                        kwargs[key] = config_dict["lmfit"][key]
+
+            # We have a default here set to add minimizer_kwargs,
+            # which will crash for minimizers that don't support this
+            minimizers_with_minimizer_kwargs = [
+                "basinhopping",
+                "dual_annealing",
+                "shgo",
+            ]
+
+            if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
+                kwargs.pop("minimizer_kwargs", None)
+
+            # Find any NaNs in data or error maps
+            good_idx = np.where(np.logical_and(np.isfinite(data), np.isfinite(error)))
+
+            # And the velocity resolution
+            dv = np.abs(np.nanmedian(np.diff(glob_vel)))
+
+            p0 = np.array(glob_config["p0"] * n_comp)
+
+            # Do the default method, where we brute force through
+            # the least squares
+            if glob_config["lmfit_method"] == "default":
+
+                # Move the velocities a channel to encourage parameter space hunting
+
+                for i in range(n_comp):
+                    p0[prop_len * i + vel_idx] += i * dv
+
+                params = Parameters()
+                p0_idx = 0
+                for i in range(n_comp):
+                    for j in range(prop_len):
+                        params.add(
+                            f"{glob_config["props"][j]}_{i}",
+                            value=p0[p0_idx],
+                            min=bounds[j][0],
+                            max=bounds[j][1],
+                        )
+                        p0_idx += 1
+
+                # Use lmfit to get an initial fit
+                lmfit_result = minimize(
+                    fcn=initial_lmfit,
+                    params=params,
+                    args=(
+                        data[good_idx],
+                        error[good_idx],
+                        glob_vel[good_idx],
+                        glob_config["strength_lines"],
+                        glob_config["v_lines"],
+                        glob_config["props"],
+                        n_comp,
+                        glob_config["fit_type"],
+                        True,
+                    ),
+                    **kwargs,
+                )
+
+                p0_fit = np.array(
+                    [lmfit_result.params[key].value for key in lmfit_result.params]
+                )
+
+            # Get an initial guess for the velocities via an iterative method
+            elif glob_config["lmfit_method"] == "iterative":
+
+                # Start with flat line model
+                it_model = np.zeros(len(data))
+
+                lmfit_result = None
+                params = Parameters()
+                p0_fit = np.array([])
+
+                # Convolve will fail if there are NaNs in the spectrum,
+                # so interpolate over them now
+                data_interp = copy.deepcopy(data)
+
+                nan_idx = ~np.isfinite(data_interp)
+                x = np.arange(len(data_interp))
+
+                data_interp[nan_idx] = np.interp(
+                    x[nan_idx],
+                    x[~nan_idx],
+                    data_interp[~nan_idx],
+                )
+
+                for comp in range(n_comp):
+
+                    it_data = data_interp - it_model
+
+                    # Find lines. We impose no flux cut here
+                    # flux_threshold = np.nanmedian(error) * u.K
+                    flux_threshold = None
+                    spec = Spectrum(
+                        flux=it_data * u.K,
+                        spectral_axis=glob_vel * u.km / u.s,
+                    )
+                    found_lines = find_lines_derivative(
+                        spec,
+                        flux_threshold=flux_threshold,
+                    )
+
+                    # Only take emission lines
+                    found_lines = found_lines[found_lines["line_type"] == "emission"]
+
+                    # Now take these lines and order by flux
+                    found_line_fluxes = np.array(
+                        [
+                            float(np.abs(it_data[x]))
+                            for x in found_lines["line_center_index"]
+                        ]
+                    )
+                    found_line_vels = found_lines["line_center"].value
+
+                    # Sort from brightest to faintest, pick the brightest component
+                    idxs = np.argsort(found_line_fluxes)[::-1]
+                    found_line_vel = found_line_vels[idxs][0]
+
+                    # Having found the velocity, we then fit all components to the data
+                    p0 = np.array([float(x) for x in glob_config["p0"]])
+                    p0[vel_idx] = copy.deepcopy(found_line_vel)
+
+                    # Update the parameters with any new best guesses
+                    if lmfit_result is not None:
+                        for key in lmfit_result.params:
+                            params[key].set(value=lmfit_result.params[key].value)
+
+                    for j in range(prop_len):
+                        params.add(
+                            f"{glob_config["props"][j]}_{comp}",
+                            value=p0[j],
+                            min=bounds[j][0],
+                            max=bounds[j][1],
+                        )
+
+                    # Get a fit to the actual data
+                    lmfit_result = minimize(
+                        fcn=initial_lmfit,
+                        params=params,
+                        args=(
+                            data[good_idx],
+                            error[good_idx],
+                            glob_vel[good_idx],
+                            glob_config["strength_lines"],
+                            glob_config["v_lines"],
+                            glob_config["props"],
+                            comp + 1,
+                            glob_config["fit_type"],
+                            True,
+                        ),
+                        **kwargs,
+                    )
+
+                    p0_fit = np.array(
+                        [lmfit_result.params[key].value for key in lmfit_result.params]
+                    )
+
+                    it_model = multiple_components(
+                        p0_fit,
+                        vel=glob_vel,
+                        strength_lines=glob_config["strength_lines"],
+                        v_lines=glob_config["v_lines"],
+                        props=glob_config["props"],
+                        n_comp=comp + 1,
+                        fit_type=glob_config["fit_type"],
+                        log_tau=True,
+                    )
+
+            else:
+
+                raise ValueError(
+                    f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}"
+                )
+
+            # Sort p0 so it has monotonically increasing velocities
+            v0_values = np.array(
+                [p0_fit[prop_len * i + vel_idx] for i in range(n_comp)]
+            )
+            v0_sort = v0_values.argsort()
+            p0_fit_sort = [
+                p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort
+            ]
+            p0_fit = np.array([item for sublist in p0_fit_sort for item in sublist])
+
+        # Ensure we have an array here
+        if not isinstance(p0_fit, np.ndarray):
+            p0_fit = np.array(p0_fit)
+
+        n_dims = len(p0_fit)
+
+        # If we have an adaptive number of walkers, account for that here
+        if isinstance(glob_config["n_walkers"], str):
+            n_walkers = int(glob_config["n_walkers"].split("*")[0]) * n_dims
+        else:
+            n_walkers = copy.deepcopy(glob_config["n_walkers"])
+
+        sampler = emcee_wrapper(
+            data,
+            error,
+            p0=p0_fit,
+            n_walkers=n_walkers,
+            n_dims=n_dims,
+            n_comp=n_comp,
+            progress=progress,
+        )
+
+        if save:
+            # Calculate max likelihood
+            flat_samples = get_samples(
+                sampler,
+                burn_in_frac=glob_config["burn_in"],
+                thin_frac=glob_config["thin"],
+            )
+            parameter_median = np.nanmedian(
+                flat_samples,
+                axis=0,
+            )
+            likelihood = ln_like(
+                theta=parameter_median,
+                intensity=data,
+                intensity_err=error,
+                vel=glob_vel,
+                strength_lines=glob_config["strength_lines"],
+                v_lines=glob_config["v_lines"],
+                props=glob_config["props"],
+                n_comp=n_comp,
+                fit_type=glob_config["fit_type"],
+            )
+
+            fit_dict = {
+                "sampler": sampler,
+                "n_comp": n_comp,
+                "likelihood": likelihood,
+            }
+
+            save_fit_dict(fit_dict, fit_dict_filename)
+    else:
+        fit_dict = load_fit_dict(fit_dict_filename)
+        sampler = fit_dict["sampler"]
+
+    return sampler
+
+
+def emcee_wrapper(
+    data,
+    error,
+    p0,
+    n_walkers,
+    n_dims,
+    n_comp=1,
+    progress=False,
+):
+    """Light wrapper around emcee
+
+    The runs the emcee part, with some custom moves
+    and passes the arguments neatly to functions
+
+    Args:
+        data: Observed data
+        error: Observed uncertainty
+        p0: Initial guess position for the walkers
+        n_walkers: Number of emcee walkers
+        n_dims: Number of dimensions for the problem
+        n_comp: Number of components to fit. Defaults
+            to None
+        progress: Whether or not to display progress bar.
+            Defaults to False
+    """
+
+    if glob_config["data_type"] == "spectrum":
+
+        # Multiprocess here for speed
+
+        with mp.Pool(glob_config["n_cores"]) as pool:
+            sampler = run_mcmc_sampler(
+                data=data,
+                error=error,
+                p0=p0,
+                n_walkers=n_walkers,
+                n_dims=n_dims,
+                n_comp=n_comp,
+                progress=progress,
+                pool=pool,
+            )
+
+    else:
+
+        # Run in serial since the cube is multiprocessing already (no daemons here, not today satan)
+        sampler = run_mcmc_sampler(
+            data=data,
+            error=error,
+            p0=p0,
+            n_walkers=n_walkers,
+            n_dims=n_dims,
+            n_comp=n_comp,
+            progress=progress,
+        )
+
+    return sampler
+
+
+def run_mcmc_sampler(
+    data,
+    error,
+    p0,
+    n_walkers,
+    n_dims,
+    n_comp=1,
+    progress=False,
+    pool=None,
+):
+    """Tool for actually running emcee
+
+    There are two options here, fixed and adaptive which
+    determine how long to run the MCMC walkers for. See
+    the docs for more details
+
+    Args:
+        data: Observed data
+        error: Observed uncertainty
+        p0: Initial position guess for the walkers
+        n_walkers: Number of emcee walkers
+        n_dims: Number of dimensions for the problem
+        n_comp: Number of components to fit. Defaults
+            to None
+        progress: Whether or not to display progress bar.
+            Defaults to False
+        pool: If running in multiprocessing mode, this
+            is the mp Pool
+    """
+
+    # Set up the sampler
+    sampler = emcee.EnsembleSampler(
+        nwalkers=n_walkers,
+        ndim=n_dims,
+        log_prob_fn=ln_prob,
+        args=(
+            data,
+            error,
+            glob_vel,
+            glob_config["strength_lines"],
+            glob_config["v_lines"],
+            glob_config["props"],
+            glob_config["bounds"],
+            n_comp,
+            glob_config["fit_type"],
+        ),
+        moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
+        pool=pool,
+    )
+
+    # START INITIALISATION RUNS
+
+    # The initial positions use data percentage
+    pos = initialise_positions(
+        p0=p0,
+        n_walkers=n_walkers,
+        n_dims=n_dims,
+        n_comp=n_comp,
+        data_percentage=True,
+    )
+
+    for i in range(glob_config["n_initialisation"]):
+        state = sampler.run_mcmc(
+            pos,
+            glob_config["n_initialisation_steps"],
+            progress=progress,
+        )
+
+        # Get where we're at the maximum likelihood for the next
+        # round, but also keep all the positions around in case
+        # we're done
+        max_prob_idx = np.argmax(state.log_prob)
+        pos = copy.deepcopy(state.coords)
+        p0 = pos[max_prob_idx]
+
+        sampler.reset()
+
+        # Initialise the walkers for the next run from the maximum
+        # likelihood estimate
+        pos = initialise_positions(
+            p0=p0,
+            n_walkers=n_walkers,
+            n_dims=n_dims,
+            n_comp=n_comp,
+            data_percentage=False,
+        )
+
+    # Simple case where we have the fixed steps
+    if glob_config["emcee_run_method"] == "fixed":
+        sampler.run_mcmc(
+            pos,
+            glob_config["n_steps"],
+            progress=progress,
+        )
+
+    elif glob_config["emcee_run_method"] == "adaptive":
+
+        # Set up a tau for testing convergence
+        old_tau = np.inf
+
+        for _ in sampler.sample(
+            pos,
+            iterations=glob_config["max_steps"],
+            progress=progress,
+        ):
+
+            # Only check convergence every 100 steps
+            if sampler.iteration % 100:
+                continue
+
+            # Compute the median autocorrelation time so far
+            # Using tol=0 means that we'll always get an estimate even
+            # if it isn't trustworthy
+            tau = np.nanmedian(sampler.get_autocorr_time(tol=0))
+
+            # Check convergence
+            converged = tau * glob_config["convergence_factor"] < sampler.iteration
+            converged &= np.abs(old_tau - tau) / tau < glob_config["tau_change"]
+            if converged:
+                break
+            old_tau = tau
+
+    else:
+        raise ValueError(
+            f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
+            f"not {glob_config['emcee_run_method']}"
+        )
+
+    return sampler
+
+
+def initialise_positions(
+    p0,
+    n_walkers,
+    n_dims,
+    n_comp,
+    data_percentage=False,
+):
+    """Initialise positions for the walkers
+
+    Args:
+        p0: "best fit" values
+        n_walkers: number of walkers
+        n_dims: number of dimensions
+        n_comp: number of components
+        data_percentage: Whether to move walkers
+            around based on a percentage of data.
+            Defaults to False
+    """
+
+    # Shuffle the parameters around a little.
+
+    # If we're using some percentage of the data, include that here,
+    # but avoid values less than 1
+    if data_percentage:
+        p0_movement = np.max(
+            np.array([1e-2 * np.abs(p0), 1e-2 * np.ones_like(p0)]),
+            axis=0,
+        )
+    else:
+        p0_movement = 1e-4 * np.ones_like(p0)
+
+    # Reinitialise the walkers at this point, wiggle around a small amount
+    pos = p0 + p0_movement * np.random.randn(n_walkers, n_dims)
+
+    # Enforce positive values for t_ex, width for the LTE/pure Gaussian fitting
+    if glob_config["fit_type"] == "lte":
+        positive_idx = [0, 3]
+    elif glob_config["fit_type"] == "pure_gauss":
+        positive_idx = [0, 2]
+    elif glob_config["fit_type"] == "radex":
+        positive_idx = [0, 1, 4]
+    else:
+        logger.warning(f"Fit type {glob_config['fit_type']} not understood!")
+        sys.exit()
+
+    prop_len = len(glob_config["props"])
+
+    enforced_positives = [
+        [prop_len * i + j] for i in range(n_comp) for j in positive_idx
+    ]
+    enforced_positives = [item for sublist in enforced_positives for item in sublist]
+
+    for i in enforced_positives:
+        pos[:, i] = np.abs(pos[:, i])
+
+    return pos
+
+
+def parallel_fit_samples(
+    ij,
+    fit_dict_filename=None,
+    n_comp=None,
+):
+    """Pull fit percentiles from a single pixel"""
+
+    if not fit_dict_filename or n_comp is None:
+        logger.warning("Fit dict filename and n_comp must be defined!")
+        sys.exit()
+
+    i = ij[0]
+    j = ij[1]
+
+    n_comp_pix = int(n_comp[i, j])
+
+    cube_sampler_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+
+    if n_comp_pix == 0:
+        return np.zeros([3, len(glob_vel)])
+    fit_dict = load_fit_dict(cube_sampler_filename)
+
+    flat_samples = get_samples_from_fit_dict(
+        fit_dict, burn_in_frac=glob_config["burn_in"], thin_frac=glob_config["thin"]
+    )
+
+    fit_lines = get_fits_from_samples(
+        flat_samples,
+        vel=glob_vel,
+        props=glob_config["props"],
+        strength_lines=glob_config["strength_lines"],
+        v_lines=glob_config["v_lines"],
+        fit_type=glob_config["fit_type"],
+        n_draws=100,
+        n_comp=n_comp_pix,
+    )
+
+    fit_percentiles = np.nanpercentile(
+        np.nansum(fit_lines, axis=-1),
+        [50, 16, 84],
+        axis=1,
+    )
+
+    return fit_percentiles
+
+
+def get_fits_from_samples(
+    samples,
+    vel,
+    props,
+    strength_lines,
+    v_lines,
+    fit_type="lte",
+    n_draws=100,
+    n_comp=1,
+):
+    """Get a number of fit lines from an MCMC run
+
+    Args:
+        samples: emcee output
+        vel: Velocity grid to evaluate the fit on
+        props: List of properties
+        strength_lines: List of line strengths
+        fit_type: Fit type. Defaults to "lte"
+        v_lines: List of line velocities
+        n_draws (int): Number of draws to pull from samples
+        n_comp (int): Number of components in the fit
+
+    Returns:
+        array of best fit line
+    """
+
+    fit_lines = np.zeros([len(vel), n_draws, n_comp])
+
+    for draw in range(n_draws):
+        sample = np.random.randint(low=0, high=samples.shape[0])
+        for i in range(n_comp):
+            theta_draw = samples[sample, ...][
+                len(props) * i : len(props) * i + len(props)
+            ]
+
+            if fit_type == "lte":
+
+                fit_lines[:, draw, i] = hyperfine_structure_lte(
+                    *theta_draw,
+                    strength_lines=strength_lines,
+                    v_lines=v_lines,
+                    vel=vel,
+                )
+
+            elif fit_type == "pure_gauss":
+
+                fit_lines[:, draw, i] = hyperfine_structure_pure_gauss(
+                    *theta_draw,
+                    strength_lines=strength_lines,
+                    v_lines=v_lines,
+                    vel=vel,
+                )
+
+            elif fit_type == "radex":
+
+                qn_ul = np.array(range(len(radex_grid["QN_ul"].values)))
+
+                fit_lines[:, draw, i] = get_radex_multiple_components(
+                    theta_draw,
+                    vel=vel,
+                    v_lines=v_lines,
+                    qn_ul=qn_ul,
+                )
+
+    return fit_lines
+
+
+def parallel_map_making(
+    ij,
+    n_comp=None,
+    fit_dict_filename="fit_dict",
+    n_samples=500,
+):
+    """Pull parameters for map out of a single pixel"""
+
+    if n_comp is None:
+        logger.warning("n_comp should be defined!")
+        sys.exit()
+
+    i, j = ij[0], ij[1]
+    n_comps_pix = int(n_comp[i, j])
+
+    par_dict = {}
+
+    obs = glob_data[:, i, j]
+    obs_err = glob_error[:, i, j]
+
+    if n_comps_pix > 0:
+
+        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+        fit_dict = load_fit_dict(cube_fit_dict_filename)
+
+        flat_samples = get_samples_from_fit_dict(
+            fit_dict,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+
+        # Pull out median and errors for each parameter and each component
+        param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
+        param_diffs = np.diff(param_percentiles, axis=0)
+
+        # Pull out model for reduced chi-square
+        total_model = multiple_components(
+            theta=param_percentiles[1, :],
+            vel=glob_vel,
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            props=glob_config["props"],
+            n_comp=n_comps_pix,
+            fit_type=glob_config["fit_type"],
+        )
+
+        for n_comp_pix in range(n_comps_pix):
+
+            # Pull out peak intensities and errors for each component
+
+            tpeak = np.zeros(n_samples)
+            idx_offset = len(glob_config["props"])
+            for sample in range(n_samples):
+                choice_idx = np.random.randint(0, flat_samples.shape[0])
+                theta = flat_samples[
+                    choice_idx,
+                    idx_offset * n_comp_pix : idx_offset * n_comp_pix + idx_offset,
+                ]
+
+                if glob_config["fit_type"] == "lte":
+                    model = hyperfine_structure_lte(
+                        *theta,
+                        strength_lines=glob_config["strength_lines"],
+                        v_lines=glob_config["v_lines"],
+                        vel=glob_vel,
+                    )
+
+                elif glob_config["fit_type"] == "pure_gauss":
+                    model = hyperfine_structure_pure_gauss(
+                        *theta,
+                        strength_lines=glob_config["strength_lines"],
+                        v_lines=glob_config["v_lines"],
+                        vel=glob_vel,
+                    )
+
+                elif glob_config["fit_type"] == "radex":
+
+                    model = hyperfine_structure_radex(
+                        *theta,
+                        v_lines=glob_config["v_lines"],
+                        vel=glob_vel,
+                    )
+
+                else:
+                    logger.warning(
+                        f"Fit type {glob_config['fit_type']} not understood!"
+                    )
+                    sys.exit()
+
+                tpeak[sample] = np.nanmax(model)
+
+            tpeak_percentiles = np.percentile(tpeak, [16, 50, 84], axis=0)
+            tpeak_diff = np.diff(tpeak_percentiles)
+
+            par_dict[f"tpeak_{n_comp_pix}"] = tpeak_percentiles[1]
+            par_dict[f"tpeak_{n_comp_pix}_err_down"] = tpeak_diff[0]
+            par_dict[f"tpeak_{n_comp_pix}_err_up"] = tpeak_diff[1]
+
+            # Pull out fitted properties and errors for each component
+
+            for prop_idx, prop in enumerate(glob_config["props"]):
+                param_idx = n_comp_pix * len(glob_config["props"]) + prop_idx
+                par_dict[f"{prop}_{n_comp_pix}"] = param_percentiles[1, param_idx]
+                par_dict[f"{prop}_{n_comp_pix}_err_down"] = param_diffs[0, param_idx]
+                par_dict[f"{prop}_{n_comp_pix}_err_up"] = param_diffs[1, param_idx]
+
+            # Pull out covariance
+            if glob_config["keep_covariance"]:
+                par_dict["cov"] = copy.deepcopy(fit_dict["cov"])
+
+    else:
+        total_model = np.zeros_like(obs)
+
+    # Add in reduced chisq
+    chisq = chi_square(obs, total_model, obs_err)
+    deg_freedom = len(obs[~np.isnan(obs)]) - (n_comps_pix * len(glob_config["props"]))
+    par_dict["chisq_red"] = chisq / deg_freedom
+
+    return par_dict
+
+
 class HyperfineFitter:
 
     def __init__(
@@ -803,36 +1657,38 @@ class HyperfineFitter:
             * Test the radex fitting routines on cubes.
         """
 
-        logging.basicConfig(
-            level=logging.INFO,
-            format="[%(levelname)s] %(asctime)s - %(name)s - %(funcName)s - %(message)s",
-        )
-        self.logger = logging.getLogger(__name__)
-
         # Let us know if ndradex has been imported
         if not NDRADEX_IMPORTED:
-            self.logger.warning("ndradex not imported. RT capabilities disabled")
+            logger.warning("ndradex not imported. RT capabilities disabled")
 
         if data is None:
-            self.logger.warning("data should be provided!")
+            logger.warning("data should be provided!")
             sys.exit()
         if vel is None:
-            self.logger.warning(
+            logger.warning(
                 "velocity definition should be provided! Defaulting to monotonically increasing"
             )
             vel = np.arange(data.shape[0])
         if error is None:
-            self.logger.info("No error provided. Defaulting to 0")
+            logger.info("No error provided. Defaulting to 0")
             error = np.zeros_like(data)
 
-        self.data = data
-        self.vel = vel
-        self.error = error
+        self.logger = logger
 
-        self.downsampled_data = None
-        self.downsampled_error = None
-        self.downsampled_mask = None
-        self.initial_ncomp = None
+        self.data = data
+        self.error = error
+        self.vel = vel
+
+        # Define global variables for potentially huge arrays
+        global glob_data, glob_error, glob_vel
+        glob_data = data
+        glob_error = error
+        glob_vel = vel
+
+        self.downsampled_data = np.array([])
+        self.downsampled_error = np.array([])
+        self.downsampled_mask = np.array([])
+        self.initial_ncomp = np.array([])
 
         with open(CONFIG_DEFAULT_PATH, "rb") as f:
             config_defaults = tomllib.load(f)
@@ -972,15 +1828,15 @@ class HyperfineFitter:
 
             self.strength_lines = np.array(
                 [
-                    strength_lines[line_name]
-                    for line_name in strength_lines.keys()
+                    strength_lines_dict[line_name]
+                    for line_name in strength_lines_dict.keys()
                     if self.line in line_name
                 ]
             )
             self.v_lines = np.array(
                 [
-                    v_lines[line_name]
-                    for line_name in v_lines.keys()
+                    v_lines_dict[line_name]
+                    for line_name in v_lines_dict.keys()
                     if self.line in line_name
                 ]
             )
@@ -995,15 +1851,15 @@ class HyperfineFitter:
 
             self.strength_lines = np.array(
                 [
-                    strength_lines[line_name]
-                    for line_name in strength_lines.keys()
+                    strength_lines_dict[line_name]
+                    for line_name in strength_lines_dict.keys()
                     if self.line in line_name
                 ]
             )
             self.v_lines = np.array(
                 [
-                    v_lines[line_name]
-                    for line_name in v_lines.keys()
+                    v_lines_dict[line_name]
+                    for line_name in v_lines_dict.keys()
                     if self.line in line_name
                 ]
             )
@@ -1254,6 +2110,39 @@ class HyperfineFitter:
             self.logger.warning(f"fit_type {self.fit_type} not known")
             sys.exit()
 
+        # Define a global configuration dictionary that we'll use in multiprocessing
+        global glob_config
+
+        keys_to_glob = [
+            "config_defaults",
+            "config",
+            "data_type",
+            "props",
+            "p0",
+            "bounds",
+            "strength_lines",
+            "v_lines",
+            "delta_bic_cutoff",
+            "delta_aic_cutoff",
+            "lmfit_method",
+            "fit_type",
+            "emcee_run_method",
+            "n_cores",
+            "n_walkers",
+            "n_steps",
+            "n_initialisation",
+            "n_initialisation_steps",
+            "burn_in",
+            "thin",
+            "convergence_factor",
+            "tau_change",
+            "max_steps",
+            "keep_sampler",
+            "keep_covariance",
+        ]
+        for k in keys_to_glob:
+            glob_config[k] = self.__dict__[k]
+
         self.parameter_maps = None
         self.covariance_dict = None
         self.max_n_comp = None
@@ -1446,6 +2335,10 @@ class HyperfineFitter:
         self.downsampled_error = downsampled_error
         self.downsampled_mask = downsampled_mask
 
+        global glob_downsampled_data, glob_downsampled_error
+        glob_downsampled_data = downsampled_data
+        glob_downsampled_error = downsampled_error
+
         if n_comp_filename is None:
             n_comp_filename = get_dict_val(
                 self.config,
@@ -1499,6 +2392,9 @@ class HyperfineFitter:
                 ]
 
         self.initial_ncomp = copy.deepcopy(n_comp_upsampled)
+
+        global glob_initial_ncomp
+        glob_initial_ncomp = self.initial_ncomp
 
         return True
 
@@ -1577,7 +2473,7 @@ class HyperfineFitter:
             mask = copy.deepcopy(self.downsampled_mask)
 
             # If somehow we've broken the logic here, then freak out
-            if data is None:
+            if data.size == 0:
                 raise ValueError(
                     "Must run data downsampling if you want to fit downsampled data"
                 )
@@ -1589,12 +2485,10 @@ class HyperfineFitter:
 
             if not os.path.exists(f"{fit_dict_filename}.pkl") or overwrite:
 
-                n_comp, likelihood, sampler, cov_matrix, cov_med = (
-                    self.delta_bic_looper(
-                        data,
-                        error,
-                        progress=progress,
-                    )
+                n_comp, likelihood, sampler, cov_matrix, cov_med = delta_bic_looper(
+                    data,
+                    error,
+                    progress=progress,
                 )
                 if save:
 
@@ -1661,7 +2555,7 @@ class HyperfineFitter:
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_fitting,
+                                parallel_fitting,
                                 fit_dict_filename=fit_dict_filename,
                                 data_type=data_type,
                                 save=save,
@@ -1681,980 +2575,6 @@ class HyperfineFitter:
             if save:
                 np.save(f"{n_comp_filename}.npy", n_comp)
                 np.save(f"{likelihood_filename}.npy", likelihood)
-
-    def parallel_fitting(
-        self,
-        ij,
-        fit_dict_filename="fit_dict",
-        data_type="original",
-        save=True,
-        overwrite=False,
-    ):
-        """Parallel function for MCMC fitting.
-
-        Wraps up the MCMC fitting to pass off to multiple cores. Because of overheads, it's easier to farm out multiple
-        fits to multiple cores, rather than run the MCMC with multiple threads.
-
-        Args:
-            ij (tuple): tuple containing (i, j) coordinates of the pixel to fit.
-            fit_dict_filename (str): Base filename for MCMC ft pickle. Will append coordinates on afterwards. Defaults
-                to fit_dict.
-            data_type: Data type to fit. Can be either "original" or "downsampled"
-            save (bool): Save out files? Defaults to True.
-            overwrite (bool): Overwrite existing files? Defaults to False.
-
-        Returns:
-            Number of fitted components and the best-fit likelihood.
-        """
-
-        if data_type not in ["original", "downsampled"]:
-            raise ValueError("Data type to fit should be original or downsampled")
-
-        i = ij[0]
-        j = ij[1]
-
-        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}"
-
-        if data_type == "original":
-            data = copy.deepcopy(self.data)
-            error = copy.deepcopy(self.error)
-        elif data_type == "downsampled":
-            data = copy.deepcopy(self.downsampled_data)
-            error = copy.deepcopy(self.downsampled_error)
-
-            # If somehow we've broken the logic here, then freak out
-            if data is None:
-                raise ValueError(
-                    "Must run data downsampling if you want to fit downsampled data"
-                )
-
-        else:
-            raise ValueError("Data type to fit should be original or downsampled")
-
-        if not os.path.exists(f"{cube_fit_dict_filename}.pkl") or overwrite:
-            self.logger.debug(f"Fitting {i}, {j}")
-            data = data[:, i, j]
-            error = error[:, i, j]
-
-            initial_ncomp = None
-            if self.initial_ncomp is not None:
-                initial_ncomp = self.initial_ncomp[i, j]
-
-            # Limit to a single core to avoid weirdness
-            with threadpool_limits(limits=1, user_api=None):
-                n_comp, likelihood, sampler, cov_matrix, cov_med = (
-                    self.delta_bic_looper(
-                        data=data,
-                        error=error,
-                        initial_ncomp=initial_ncomp,
-                    )
-                )
-
-            if save:
-
-                fit_dict = {
-                    "n_comp": n_comp,
-                    "likelihood": likelihood,
-                    "sampler": None,
-                    "cov": {},
-                }
-                if self.keep_sampler:
-                    fit_dict["sampler"] = sampler
-                else:
-                    fit_dict.pop("sampler")
-
-                if self.keep_covariance:
-                    fit_dict["cov"] = {
-                        "matrix": cov_matrix,
-                        "med": cov_med,
-                    }
-                else:
-                    fit_dict.pop("cov")
-
-                save_fit_dict(fit_dict, f"{cube_fit_dict_filename}.pkl")
-
-        else:
-
-            fit_dict = load_fit_dict(f"{cube_fit_dict_filename}.pkl")
-
-            n_comp = fit_dict["n_comp"]
-            likelihood = fit_dict["likelihood"]
-
-        self.logger.debug(f"N components: {n_comp}, likelihood: {likelihood:.2f}")
-
-        return n_comp, likelihood
-
-    def delta_bic_looper(
-        self,
-        data,
-        error,
-        initial_ncomp=None,
-        save=False,
-        overwrite=True,
-        progress=False,
-    ):
-        """Increase spectral complexity until we hit diminishing returns
-
-        This will iteratively build up the spectral model one component
-        at a time, before looping backwards to remove the weaker components
-        which might just be fits to the noise
-
-        Args:
-            data: Observed data
-            error: Observed error
-            initial_ncomp: Initial guess at number of components.
-                Defaults to None.
-            save: Whether to save out or not, defaults to False
-            overwrite: Whether to overwrite existing fits. Defaults to False
-            progress: Whether to display progress bars or not. Defaults to False
-
-        Returns:
-            fitted number of components, likelihood, and the emcee sampler
-        """
-
-        delta_bic = np.inf
-        delta_aic = np.inf
-        sampler_old = None
-        likelihood_old = None
-        sampler = None
-        cov_matrix = None
-        cov_med = None
-        prop_len = len(self.props)
-        ln_m = np.log(len(data[~np.isnan(data)]))
-
-        if initial_ncomp is None:
-            # We start with a zero component model, i.e. a flat line
-            n_comp = 0
-            likelihood = ln_like(
-                theta=0,
-                intensity=data,
-                intensity_err=error,
-                vel=self.vel,
-                strength_lines=self.strength_lines,
-                v_lines=self.v_lines,
-                props=self.props,
-                n_comp=n_comp,
-                fit_type=self.fit_type,
-            )
-            bic = -2 * likelihood
-            aic = -2 * likelihood
-
-        else:
-            # Start with an initial guess of component numbers
-            n_comp = int(initial_ncomp)
-            k = n_comp * prop_len
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                sampler = self.run_mcmc(
-                    data,
-                    error,
-                    n_comp=n_comp,
-                    save=save,
-                    overwrite=overwrite,
-                    progress=progress,
-                )
-
-            # Calculate max likelihood parameters and BIC
-            flat_samples = self.get_samples(sampler)
-            parameter_median = np.nanmedian(
-                flat_samples,
-                axis=0,
-            )
-            likelihood = ln_like(
-                theta=parameter_median,
-                intensity=data,
-                intensity_err=error,
-                vel=self.vel,
-                strength_lines=self.strength_lines,
-                v_lines=self.v_lines,
-                props=self.props,
-                n_comp=n_comp,
-                fit_type=self.fit_type,
-            )
-
-            # Calculate BIC and AIC
-            bic = k * ln_m - 2 * likelihood
-            aic = 2 * k - 2 * likelihood
-
-        while delta_bic > self.delta_bic_cutoff or delta_aic > self.delta_aic_cutoff:
-            # Store the previous BIC and sampler, since we need them later
-            bic_old = bic
-            aic_old = aic
-            sampler_old = sampler
-            likelihood_old = likelihood
-
-            # Increase the number of components, refit
-            n_comp += 1
-            k = n_comp * prop_len
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                sampler = self.run_mcmc(
-                    data,
-                    error,
-                    n_comp=n_comp,
-                    save=save,
-                    overwrite=overwrite,
-                    progress=progress,
-                )
-
-            # Calculate max likelihood parameters and BIC
-            flat_samples = self.get_samples(sampler)
-            parameter_median = np.nanmedian(
-                flat_samples,
-                axis=0,
-            )
-            likelihood = ln_like(
-                theta=parameter_median,
-                intensity=data,
-                intensity_err=error,
-                vel=self.vel,
-                strength_lines=self.strength_lines,
-                v_lines=self.v_lines,
-                props=self.props,
-                n_comp=n_comp,
-                fit_type=self.fit_type,
-            )
-
-            # Calculate BIC and AIC
-            bic = k * ln_m - 2 * likelihood
-            delta_bic = bic_old - bic
-
-            aic = 2 * k - 2 * likelihood
-            delta_aic = aic_old - aic
-
-        sampler = sampler_old
-        likelihood = likelihood_old
-        n_comp -= 1
-
-        # Now loop backwards, iteratively remove the weakest component and refit. Only if we have a >0 order fit!
-
-        if n_comp > 0:
-            max_back_loops = n_comp
-
-            for i in range(max_back_loops):
-                flat_samples = self.get_samples(sampler)
-                parameter_median = np.nanmedian(
-                    flat_samples,
-                    axis=0,
-                )
-
-                if self.fit_type == "lte":
-                    line_intensities = np.array(
-                        [
-                            hyperfine_structure_lte(
-                                *parameter_median[
-                                    prop_len * i : prop_len * i + prop_len
-                                ],
-                                strength_lines=self.strength_lines,
-                                v_lines=self.v_lines,
-                                vel=self.vel,
-                            )
-                            for i in range(n_comp)
-                        ]
-                    )
-
-                elif self.fit_type == "pure_gauss":
-                    line_intensities = np.array(
-                        [
-                            hyperfine_structure_pure_gauss(
-                                *parameter_median[
-                                    prop_len * i : prop_len * i + prop_len
-                                ],
-                                strength_lines=self.strength_lines,
-                                v_lines=self.v_lines,
-                                vel=self.vel,
-                            )
-                            for i in range(n_comp)
-                        ]
-                    )
-
-                elif self.fit_type == "radex":
-                    line_intensities = np.array(
-                        [
-                            hyperfine_structure_radex(
-                                *parameter_median[
-                                    prop_len * i : prop_len * i + prop_len
-                                ],
-                                v_lines=self.v_lines,
-                                vel=self.vel,
-                            )
-                            for i in range(n_comp)
-                        ]
-                    )
-                else:
-                    self.logger.warning(f"Fit type {self.fit_type} not understood!")
-                    sys.exit()
-
-                integrated_intensities = np.trapz(line_intensities, x=self.vel, axis=-1)
-                component_order = np.argsort(integrated_intensities)
-
-                bic_old = bic
-                aic_old = aic
-                sampler_old = sampler
-                likelihood_old = likelihood
-
-                # Remove the weakest component
-                n_comp -= 1
-
-                if n_comp == 0:
-                    likelihood = ln_like(
-                        theta=0,
-                        intensity=data,
-                        intensity_err=error,
-                        vel=self.vel,
-                        strength_lines=self.strength_lines,
-                        v_lines=self.v_lines,
-                        props=self.props,
-                        n_comp=n_comp,
-                        fit_type=self.fit_type,
-                    )
-                    bic = -2 * likelihood
-                else:
-                    k = n_comp * prop_len
-                    idx_to_delete = range(
-                        prop_len * component_order[0],
-                        prop_len * component_order[0] + prop_len,
-                    )
-                    p0 = np.delete(parameter_median, idx_to_delete)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        sampler = self.run_mcmc(
-                            data,
-                            error,
-                            n_comp=n_comp,
-                            save=save,
-                            overwrite=overwrite,
-                            progress=progress,
-                            p0_fit=p0,
-                        )
-
-                    # Calculate max likelihood parameters and BIC
-                    flat_samples = self.get_samples(sampler)
-                    parameter_median = np.nanmedian(flat_samples, axis=0)
-                    likelihood = ln_like(
-                        theta=parameter_median,
-                        intensity=data,
-                        intensity_err=error,
-                        vel=self.vel,
-                        strength_lines=self.strength_lines,
-                        v_lines=self.v_lines,
-                        props=self.props,
-                        n_comp=n_comp,
-                        fit_type=self.fit_type,
-                    )
-                    bic = k * ln_m - 2 * likelihood
-                    aic = 2 * k - 2 * likelihood
-
-                delta_bic = bic_old - bic
-                delta_aic = aic_old - aic
-
-                # If removing and refitting doesn't significantly improve things, then just jump out of here
-                if (
-                    delta_bic < self.delta_bic_cutoff
-                    and delta_aic < self.delta_aic_cutoff
-                ):
-                    break
-
-            sampler = sampler_old
-            likelihood = likelihood_old
-            n_comp += 1
-
-        # Finally, calculate the covariance matrix and the parameter medians.
-        # This is only defined if we end up with a 0-component fit
-        if sampler is not None:
-            samples = self.get_samples(sampler)
-            cov_matrix = np.cov(samples.T)
-            cov_med = np.median(samples, axis=0)
-
-        return n_comp, likelihood, sampler, cov_matrix, cov_med
-
-    def run_mcmc(
-        self,
-        data,
-        error,
-        n_comp=1,
-        save=True,
-        overwrite=False,
-        progress=False,
-        fit_dict_filename="fit_dict.pkl",
-        p0_fit=None,
-    ):
-        """Run emcee to get a fit out
-
-        Args:
-            data: Observed data
-            error: Observed uncertainty
-            n_comp: Number of components to fit. Defaults to 1
-            save: Whether to save the sampler out. Defaults to True
-            overwrite: Whether to overwrite existing fit. Defaults to False
-            progress: Whether to display progress bar. Defaults to False
-            fit_dict_filename: Name for the sampler. Defaults to fit_dict.pkl
-            p0_fit: Initial guess for the fit. Defaults to None, which will
-                use some basic parameters that are likely to be suboptimal
-        """
-
-        prop_len = len(self.props)
-
-        bounds = self.bounds * n_comp
-
-        if not os.path.exists(fit_dict_filename) or overwrite:
-
-            if p0_fit is None:
-
-                vel_idx = np.where(np.array(self.props) == "v")[0][0]
-
-                # Pull in any relevant kwargs
-                kwargs = {}
-
-                for config_dict in [self.config_defaults, self.config]:
-                    if "lmfit" in config_dict:
-                        for key in config_dict["lmfit"]:
-                            kwargs[key] = config_dict["lmfit"][key]
-
-                # We have a default here set to add minimizer_kwargs,
-                # which will crash for minimizers that don't support this
-                minimizers_with_minimizer_kwargs = [
-                    "basinhopping",
-                    "dual_annealing",
-                    "shgo",
-                ]
-
-                if (
-                    kwargs.get("method", "leastsq")
-                    not in minimizers_with_minimizer_kwargs
-                ):
-                    kwargs.pop("minimizer_kwargs", None)
-
-                # Find any NaNs in data or error maps
-                good_idx = np.where(
-                    np.logical_and(np.isfinite(data), np.isfinite(error))
-                )
-
-                # And the velocity resolution
-                dv = np.abs(np.nanmedian(np.diff(self.vel)))
-
-                p0 = np.array(self.p0 * n_comp)
-
-                # Do the default method, where we brute force through
-                # the least squares
-                if self.lmfit_method == "default":
-
-                    # Move the velocities a channel to encourage parameter space hunting
-
-                    for i in range(n_comp):
-                        p0[prop_len * i + vel_idx] += i * dv
-
-                    params = Parameters()
-                    p0_idx = 0
-                    for i in range(n_comp):
-                        for j in range(prop_len):
-                            params.add(
-                                f"{self.props[j]}_{i}",
-                                value=p0[p0_idx],
-                                min=bounds[j][0],
-                                max=bounds[j][1],
-                            )
-                            p0_idx += 1
-
-                    # Use lmfit to get an initial fit
-                    lmfit_result = minimize(
-                        fcn=initial_lmfit,
-                        params=params,
-                        args=(
-                            data[good_idx],
-                            error[good_idx],
-                            self.vel[good_idx],
-                            self.strength_lines,
-                            self.v_lines,
-                            self.props,
-                            n_comp,
-                            self.fit_type,
-                            True,
-                        ),
-                        **kwargs,
-                    )
-
-                    p0_fit = np.array(
-                        [lmfit_result.params[key].value for key in lmfit_result.params]
-                    )
-
-                # Get an initial guess for the velocities via an iterative method
-                elif self.lmfit_method == "iterative":
-
-                    # Start with flat line model
-                    it_model = np.zeros(len(data))
-
-                    lmfit_result = None
-                    params = Parameters()
-                    p0_fit = np.array([])
-
-                    # Convolve will fail if there are NaNs in the spectrum,
-                    # so interpolate over them now
-                    data_interp = copy.deepcopy(data)
-
-                    nan_idx = ~np.isfinite(data_interp)
-                    x = np.arange(len(data_interp))
-
-                    data_interp[nan_idx] = np.interp(
-                        x[nan_idx],
-                        x[~nan_idx],
-                        data_interp[~nan_idx],
-                    )
-
-                    for comp in range(n_comp):
-
-                        it_data = data_interp - it_model
-
-                        # Find lines. We impose no flux cut here
-                        # flux_threshold = np.nanmedian(error) * u.K
-                        flux_threshold = None
-                        spec = Spectrum(
-                            flux=it_data * u.K,
-                            spectral_axis=self.vel * u.km / u.s,
-                        )
-                        found_lines = find_lines_derivative(
-                            spec,
-                            flux_threshold=flux_threshold,
-                        )
-
-                        # Only take emission lines
-                        found_lines = found_lines[
-                            found_lines["line_type"] == "emission"
-                        ]
-
-                        # Now take these lines and order by flux
-                        found_line_fluxes = np.array(
-                            [
-                                float(np.abs(it_data[x]))
-                                for x in found_lines["line_center_index"]
-                            ]
-                        )
-                        found_line_vels = found_lines["line_center"].value
-
-                        # Sort from brightest to faintest, pick the brightest component
-                        idxs = np.argsort(found_line_fluxes)[::-1]
-                        found_line_vel = found_line_vels[idxs][0]
-
-                        # Having found the velocity, we then fit all components to the data
-                        p0 = np.array([float(x) for x in self.p0])
-                        p0[vel_idx] = copy.deepcopy(found_line_vel)
-
-                        # Update the parameters with any new best guesses
-                        if lmfit_result is not None:
-                            for key in lmfit_result.params:
-                                params[key].set(value=lmfit_result.params[key].value)
-
-                        for j in range(prop_len):
-                            params.add(
-                                f"{self.props[j]}_{comp}",
-                                value=p0[j],
-                                min=bounds[j][0],
-                                max=bounds[j][1],
-                            )
-
-                        # Get a fit to the actual data
-                        lmfit_result = minimize(
-                            fcn=initial_lmfit,
-                            params=params,
-                            args=(
-                                data[good_idx],
-                                error[good_idx],
-                                self.vel[good_idx],
-                                self.strength_lines,
-                                self.v_lines,
-                                self.props,
-                                comp + 1,
-                                self.fit_type,
-                                True,
-                            ),
-                            **kwargs,
-                        )
-
-                        p0_fit = np.array(
-                            [
-                                lmfit_result.params[key].value
-                                for key in lmfit_result.params
-                            ]
-                        )
-
-                        it_model = multiple_components(
-                            p0_fit,
-                            vel=self.vel,
-                            strength_lines=self.strength_lines,
-                            v_lines=self.v_lines,
-                            props=self.props,
-                            n_comp=comp + 1,
-                            fit_type=self.fit_type,
-                            log_tau=True,
-                        )
-
-                else:
-
-                    raise ValueError(
-                        f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}"
-                    )
-
-                # Sort p0 so it has monotonically increasing velocities
-                v0_values = np.array(
-                    [p0_fit[prop_len * i + vel_idx] for i in range(n_comp)]
-                )
-                v0_sort = v0_values.argsort()
-                p0_fit_sort = [
-                    p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort
-                ]
-                p0_fit = np.array([item for sublist in p0_fit_sort for item in sublist])
-
-            # Ensure we have an array here
-            if not isinstance(p0_fit, np.ndarray):
-                p0_fit = np.array(p0_fit)
-
-            n_dims = len(p0_fit)
-
-            # If we have an adaptive number of walkers, account for that here
-            if isinstance(self.n_walkers, str):
-                n_walkers = int(self.n_walkers.split("*")[0]) * n_dims
-            else:
-                n_walkers = copy.deepcopy(self.n_walkers)
-
-            sampler = self.emcee_wrapper(
-                data,
-                error,
-                p0=p0_fit,
-                n_walkers=n_walkers,
-                n_dims=n_dims,
-                n_comp=n_comp,
-                progress=progress,
-            )
-
-            if save:
-                # Calculate max likelihood
-                flat_samples = self.get_samples(sampler)
-                parameter_median = np.nanmedian(
-                    flat_samples,
-                    axis=0,
-                )
-                likelihood = ln_like(
-                    theta=parameter_median,
-                    intensity=data,
-                    intensity_err=error,
-                    vel=self.vel,
-                    strength_lines=self.strength_lines,
-                    v_lines=self.v_lines,
-                    props=self.props,
-                    n_comp=n_comp,
-                    fit_type=self.fit_type,
-                )
-
-                fit_dict = {
-                    "sampler": sampler,
-                    "n_comp": n_comp,
-                    "likelihood": likelihood,
-                }
-
-                save_fit_dict(fit_dict, fit_dict_filename)
-        else:
-            fit_dict = load_fit_dict(fit_dict_filename)
-            sampler = fit_dict["sampler"]
-
-        return sampler
-
-    def initialise_positions(
-        self,
-        p0,
-        n_walkers,
-        n_dims,
-        n_comp,
-        data_percentage=False,
-    ):
-        """Initialise positions for the walkers
-
-        Args:
-            p0: "best fit" values
-            n_walkers: number of walkers
-            n_dims: number of dimensions
-            n_comp: number of components
-            data_percentage: Whether to move walkers
-                around based on a percentage of data.
-                Defaults to False
-        """
-
-        # Shuffle the parameters around a little.
-
-        # If we're using some percentage of the data, include that here,
-        # but avoid values less than 1
-        if data_percentage:
-            p0_movement = np.max(
-                np.array([1e-2 * np.abs(p0), 1e-2 * np.ones_like(p0)]),
-                axis=0,
-            )
-        else:
-            p0_movement = 1e-4 * np.ones_like(p0)
-
-        # Reinitialise the walkers at this point, wiggle around a small amount
-        pos = p0 + p0_movement * np.random.randn(n_walkers, n_dims)
-
-        # Enforce positive values for t_ex, width for the LTE/pure Gaussian fitting
-        if self.fit_type == "lte":
-            positive_idx = [0, 3]
-        elif self.fit_type == "pure_gauss":
-            positive_idx = [0, 2]
-        elif self.fit_type == "radex":
-            positive_idx = [0, 1, 4]
-        else:
-            self.logger.warning(f"Fit type {self.fit_type} not understood!")
-            sys.exit()
-
-        prop_len = len(self.props)
-
-        enforced_positives = [
-            [prop_len * i + j] for i in range(n_comp) for j in positive_idx
-        ]
-        enforced_positives = [
-            item for sublist in enforced_positives for item in sublist
-        ]
-
-        for i in enforced_positives:
-            pos[:, i] = np.abs(pos[:, i])
-
-        return pos
-
-    def emcee_wrapper(
-        self,
-        data,
-        error,
-        p0,
-        n_walkers,
-        n_dims,
-        n_comp=1,
-        progress=False,
-    ):
-        """Light wrapper around emcee
-
-        The runs the emcee part, with some custom moves
-        and passes the arguments neatly to functions
-
-        Args:
-            data: Observed data
-            error: Observed uncertainty
-            p0: Initial guess position for the walkers
-            n_walkers: Number of emcee walkers
-            n_dims: Number of dimensions for the problem
-            n_comp: Number of components to fit. Defaults
-                to None
-            progress: Whether or not to display progress bar.
-                Defaults to False
-        """
-
-        if self.data_type == "spectrum":
-
-            # Multiprocess here for speed
-
-            with mp.Pool(self.n_cores) as pool:
-                sampler = self.run_mcmc_sampler(
-                    data=data,
-                    error=error,
-                    p0=p0,
-                    n_walkers=n_walkers,
-                    n_dims=n_dims,
-                    n_comp=n_comp,
-                    progress=progress,
-                    pool=pool,
-                )
-
-        else:
-
-            # Run in serial since the cube is multiprocessing already (no daemons here, not today satan)
-            sampler = self.run_mcmc_sampler(
-                data=data,
-                error=error,
-                p0=p0,
-                n_walkers=n_walkers,
-                n_dims=n_dims,
-                n_comp=n_comp,
-                progress=progress,
-            )
-
-        return sampler
-
-    def get_samples(
-        self,
-        sampler,
-    ):
-        """Get samples from an emcee sampler"""
-
-        # Get the burn-in and thin parameters from
-        # the sampler
-        burn_in, thin = self.get_burn_in_thin(sampler)
-
-        samples = sampler.get_chain(
-            discard=burn_in,
-            thin=thin,
-            flat=True,
-        )
-
-        return samples
-
-    def get_burn_in_thin(
-        self,
-        sampler,
-    ):
-        """Get burn-in and thin from a sampler
-
-        Args:
-            sampler: emcee sampler
-        """
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tau = sampler.get_autocorr_time(tol=0)
-
-        # Fallback if the autocorrelation time is
-        # all NaN
-        if np.all(np.isnan(tau)):
-            self.logger.debug("Autocorrelation time is NaN, will use all samples")
-            burn_in = 0
-            thin = 1
-        else:
-            burn_in = int(self.burn_in * np.nanmax(tau))
-            thin = int(self.thin * np.nanmin(tau))
-
-            # Ensure we don't have a slice step of 0
-            if thin == 0:
-                self.logger.debug("Thin is 0, will round up to 1")
-                thin = 1
-
-        return burn_in, thin
-
-    def run_mcmc_sampler(
-        self,
-        data,
-        error,
-        p0,
-        n_walkers,
-        n_dims,
-        n_comp=1,
-        progress=False,
-        pool=None,
-    ):
-        """Tool for actually running emcee
-
-        There are two options here, fixed and adaptive which
-        determine how long to run the MCMC walkers for. See
-        the docs for more details
-
-        Args:
-            data: Observed data
-            error: Observed uncertainty
-            p0: Initial position guess for the walkers
-            n_walkers: Number of emcee walkers
-            n_dims: Number of dimensions for the problem
-            n_comp: Number of components to fit. Defaults
-                to None
-            progress: Whether or not to display progress bar.
-                Defaults to False
-            pool: If running in multiprocessing mode, this
-                is the mp Pool
-        """
-
-        # Set up the sampler
-        sampler = emcee.EnsembleSampler(
-            nwalkers=n_walkers,
-            ndim=n_dims,
-            log_prob_fn=ln_prob,
-            args=(
-                data,
-                error,
-                self.vel,
-                self.strength_lines,
-                self.v_lines,
-                self.props,
-                self.bounds,
-                n_comp,
-                self.fit_type,
-            ),
-            moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
-            pool=pool,
-        )
-
-        # START INITIALISATION RUNS
-
-        # The initial positions use data percentage
-        pos = self.initialise_positions(
-            p0=p0,
-            n_walkers=n_walkers,
-            n_dims=n_dims,
-            n_comp=n_comp,
-            data_percentage=True,
-        )
-
-        for i in range(self.n_initialisation):
-            state = sampler.run_mcmc(
-                pos,
-                self.n_initialisation_steps,
-                progress=progress,
-            )
-
-            # Get where we're at the maximum likelihood for the next
-            # round, but also keep all the positions around in case
-            # we're done
-            max_prob_idx = np.argmax(state.log_prob)
-            pos = copy.deepcopy(state.coords)
-            p0 = pos[max_prob_idx]
-
-            sampler.reset()
-
-            # Initialise the walkers for the next run from the maximum
-            # likelihood estimate
-            pos = self.initialise_positions(
-                p0=p0,
-                n_walkers=n_walkers,
-                n_dims=n_dims,
-                n_comp=n_comp,
-                data_percentage=False,
-            )
-
-        # Simple case where we have the fixed steps
-        if self.emcee_run_method == "fixed":
-            sampler.run_mcmc(
-                pos,
-                self.n_steps,
-                progress=progress,
-            )
-
-        elif self.emcee_run_method == "adaptive":
-
-            # Set up a tau for testing convergence
-            old_tau = np.inf
-
-            for _ in sampler.sample(
-                pos,
-                iterations=self.max_steps,
-                progress=progress,
-            ):
-
-                # Only check convergence every 100 steps
-                if sampler.iteration % 100:
-                    continue
-
-                # Compute the median autocorrelation time so far
-                # Using tol=0 means that we'll always get an estimate even
-                # if it isn't trustworthy
-                tau = np.nanmedian(sampler.get_autocorr_time(tol=0))
-
-                # Check convergence
-                converged = tau * self.convergence_factor < sampler.iteration
-                converged &= np.abs(old_tau - tau) / tau < self.tau_change
-                if converged:
-                    break
-                old_tau = tau
-
-        else:
-            raise ValueError(
-                f"emcee_run_method should be one of {ALLOWED_EMCEE_RUN_METHODS}, "
-                f"not {self.emcee_run_method}"
-            )
-
-        return sampler
 
     def encourage_spatial_coherence(
         self,
@@ -2819,7 +2739,11 @@ class HyperfineFitter:
                             # If we have the full emcee sampler, prefer that here
                             if "sampler" in cutout_fit_dict:
                                 cutout_sampler = cutout_fit_dict["sampler"]
-                                flat_samples = self.get_samples(cutout_sampler)
+                                flat_samples = get_samples(
+                                    cutout_sampler,
+                                    burn_in_frac=self.burn_in,
+                                    thin_frac=self.thin,
+                                )
                                 pars_new = np.nanmedian(
                                     flat_samples,
                                     axis=0,
@@ -2912,65 +2836,6 @@ class HyperfineFitter:
             np.save(n_comp_output_filename, n_comp)
             np.save(likelihood_output_filename, likelihood)
 
-    def get_fits_from_samples(
-        self,
-        samples,
-        vel,
-        n_draws=100,
-        n_comp=1,
-    ):
-        """Get a number of fit lines from an MCMC run
-
-        Args:
-            samples: emcee output
-            vel: Velocity grid to evaluate the fit on
-            n_draws (int): Number of draws to pull from samples
-            n_comp (int): Number of components in the fit
-
-        Returns:
-            array of best fit line
-        """
-
-        fit_lines = np.zeros([len(vel), n_draws, n_comp])
-
-        for draw in range(n_draws):
-            sample = np.random.randint(low=0, high=samples.shape[0])
-            for i in range(n_comp):
-                theta_draw = samples[sample, ...][
-                    len(self.props) * i : len(self.props) * i + len(self.props)
-                ]
-
-                if self.fit_type == "lte":
-
-                    fit_lines[:, draw, i] = hyperfine_structure_lte(
-                        *theta_draw,
-                        strength_lines=self.strength_lines,
-                        v_lines=self.v_lines,
-                        vel=vel,
-                    )
-
-                elif self.fit_type == "pure_gauss":
-
-                    fit_lines[:, draw, i] = hyperfine_structure_pure_gauss(
-                        *theta_draw,
-                        strength_lines=self.strength_lines,
-                        v_lines=self.v_lines,
-                        vel=vel,
-                    )
-
-                elif self.fit_type == "radex":
-
-                    qn_ul = np.array(range(len(radex_grid["QN_ul"].values)))
-
-                    fit_lines[:, draw, i] = get_radex_multiple_components(
-                        theta_draw,
-                        vel=vel,
-                        v_lines=self.v_lines,
-                        qn_ul=qn_ul,
-                    )
-
-        return fit_lines
-
     def create_fit_cube(
         self,
         fit_dict_filename=None,
@@ -3045,7 +2910,7 @@ class HyperfineFitter:
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_fit_samples,
+                                parallel_fit_samples,
                                 fit_dict_filename=fit_dict_filename,
                                 n_comp=n_comp,
                             ),
@@ -3060,70 +2925,6 @@ class HyperfineFitter:
                 fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
 
             np.save(f"{cube_filename}.npy", fit_cube)
-
-    def parallel_fit_samples(
-        self,
-        ij,
-        fit_dict_filename=None,
-        n_comp=None,
-    ):
-        """Pull fit percentiles from a single pixel"""
-
-        if not fit_dict_filename or n_comp is None:
-            self.logger.warning("Fit dict filename and n_comp must be defined!")
-            sys.exit()
-
-        i = ij[0]
-        j = ij[1]
-
-        n_comp_pix = int(n_comp[i, j])
-
-        cube_sampler_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-
-        if n_comp_pix == 0:
-            return np.zeros([3, len(self.vel)])
-        fit_dict = load_fit_dict(cube_sampler_filename)
-
-        flat_samples = self.get_samples_from_fit_dict(fit_dict)
-
-        fit_lines = self.get_fits_from_samples(
-            flat_samples,
-            vel=self.vel,
-            n_draws=100,
-            n_comp=n_comp_pix,
-        )
-
-        fit_percentiles = np.nanpercentile(
-            np.nansum(fit_lines, axis=-1),
-            [50, 16, 84],
-            axis=1,
-        )
-
-        return fit_percentiles
-
-    def get_samples_from_fit_dict(self, fit_dict):
-        """Pull out a bunch of samples from a fit dictionary
-
-        Args:
-            fit_dict (dict): Fit dictionary
-        """
-
-        # If we have the full emcee sampler, prefer that here
-        if "sampler" in fit_dict:
-
-            sampler = fit_dict["sampler"]
-            flat_samples = self.get_samples(sampler)
-
-        # Otherwise, sample from the covariance matrix
-        else:
-
-            cov_matrix = fit_dict["cov"]["matrix"]
-            cov_med = fit_dict["cov"]["med"]
-            flat_samples = np.random.multivariate_normal(
-                cov_med, cov_matrix, size=10000
-            )
-
-        return flat_samples
 
     def make_parameter_maps(
         self,
@@ -3259,7 +3060,7 @@ class HyperfineFitter:
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_map_making,
+                                parallel_map_making,
                                 n_comp=n_comp,
                                 fit_dict_filename=fit_dict_filename,
                                 n_samples=n_samples,
@@ -3309,120 +3110,3 @@ class HyperfineFitter:
             self.covariance_dict = cov_dict
 
         self.max_n_comp = max_n_comp
-
-    def parallel_map_making(
-        self,
-        ij,
-        n_comp=None,
-        fit_dict_filename="fit_dict",
-        n_samples=500,
-    ):
-        """Pull parameters for map out of a single pixel"""
-
-        if n_comp is None:
-            self.logger.warning("n_comp should be defined!")
-            sys.exit()
-
-        i, j = ij[0], ij[1]
-        n_comps_pix = int(n_comp[i, j])
-
-        par_dict = {}
-
-        obs = self.data[:, i, j]
-        obs_err = self.error[:, i, j]
-
-        if n_comps_pix > 0:
-
-            cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-            fit_dict = load_fit_dict(cube_fit_dict_filename)
-
-            flat_samples = self.get_samples_from_fit_dict(fit_dict)
-
-            # Pull out median and errors for each parameter and each component
-            param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
-            param_diffs = np.diff(param_percentiles, axis=0)
-
-            # Pull out model for reduced chi-square
-            total_model = multiple_components(
-                theta=param_percentiles[1, :],
-                vel=self.vel,
-                strength_lines=self.strength_lines,
-                v_lines=self.v_lines,
-                props=self.props,
-                n_comp=n_comps_pix,
-                fit_type=self.fit_type,
-            )
-
-            for n_comp_pix in range(n_comps_pix):
-
-                # Pull out peak intensities and errors for each component
-
-                tpeak = np.zeros(n_samples)
-                idx_offset = len(self.props)
-                for sample in range(n_samples):
-                    choice_idx = np.random.randint(0, flat_samples.shape[0])
-                    theta = flat_samples[
-                        choice_idx,
-                        idx_offset * n_comp_pix : idx_offset * n_comp_pix + idx_offset,
-                    ]
-
-                    if self.fit_type == "lte":
-                        model = hyperfine_structure_lte(
-                            *theta,
-                            strength_lines=self.strength_lines,
-                            v_lines=self.v_lines,
-                            vel=self.vel,
-                        )
-
-                    elif self.fit_type == "pure_gauss":
-                        model = hyperfine_structure_pure_gauss(
-                            *theta,
-                            strength_lines=self.strength_lines,
-                            v_lines=self.v_lines,
-                            vel=self.vel,
-                        )
-
-                    elif self.fit_type == "radex":
-
-                        model = hyperfine_structure_radex(
-                            *theta,
-                            v_lines=self.v_lines,
-                            vel=self.vel,
-                        )
-
-                    else:
-                        self.logger.warning(f"Fit type {self.fit_type} not understood!")
-                        sys.exit()
-
-                    tpeak[sample] = np.nanmax(model)
-
-                tpeak_percentiles = np.percentile(tpeak, [16, 50, 84], axis=0)
-                tpeak_diff = np.diff(tpeak_percentiles)
-
-                par_dict[f"tpeak_{n_comp_pix}"] = tpeak_percentiles[1]
-                par_dict[f"tpeak_{n_comp_pix}_err_down"] = tpeak_diff[0]
-                par_dict[f"tpeak_{n_comp_pix}_err_up"] = tpeak_diff[1]
-
-                # Pull out fitted properties and errors for each component
-
-                for prop_idx, prop in enumerate(self.props):
-                    param_idx = n_comp_pix * len(self.props) + prop_idx
-                    par_dict[f"{prop}_{n_comp_pix}"] = param_percentiles[1, param_idx]
-                    par_dict[f"{prop}_{n_comp_pix}_err_down"] = param_diffs[
-                        0, param_idx
-                    ]
-                    par_dict[f"{prop}_{n_comp_pix}_err_up"] = param_diffs[1, param_idx]
-
-                # Pull out covariance
-                if self.keep_covariance:
-                    par_dict["cov"] = copy.deepcopy(fit_dict["cov"])
-
-        else:
-            total_model = np.zeros_like(obs)
-
-        # Add in reduced chisq
-        chisq = chi_square(obs, total_model, obs_err)
-        deg_freedom = len(obs[~np.isnan(obs)]) - (n_comps_pix * len(self.props))
-        par_dict["chisq_red"] = chisq / deg_freedom
-
-        return par_dict

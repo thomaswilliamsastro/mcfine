@@ -1,3 +1,4 @@
+import logging
 import multiprocessing as mp
 import sys
 import warnings
@@ -12,7 +13,9 @@ import numpy as np
 from matplotlib.gridspec import GridSpec
 from tqdm import tqdm
 
+from .emcee_funcs import get_burn_in_thin, get_samples_from_fit_dict
 from .fitting import HyperfineFitter, chi_square
+from .fitting import get_fits_from_samples
 from .utils import load_fit_dict, get_dict_val
 
 ALLOWED_FILE_EXTS = [
@@ -22,6 +25,479 @@ ALLOWED_FILE_EXTS = [
     "eps",
     "svg",
 ]
+
+logger = logging.getLogger("mcfine")
+
+# Define global variables for potentially huge arrays, and various config values
+glob_data = np.array([])
+glob_error = np.array([])
+glob_vel = np.array([])
+
+glob_config = {}
+
+
+def parallel_step(
+    ij,
+    plot_name="step",
+    fit_dict_filename="fit_dict",
+    n_comp=None,
+):
+    """Wrapper to parallelise step plotting"""
+
+    if n_comp is None:
+        raise Warning("n_comp should be defined!")
+
+    i, j = ij[0], ij[1]
+
+    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+
+    n_comp_pix = int(n_comp[i, j])
+    if n_comp_pix == 0:
+        return True
+    fit_dict = load_fit_dict(cube_fit_dict_filename)
+
+    if "sampler" not in fit_dict:
+        logger.warning("Can only produce step plots when emcee sampler is present")
+        return False
+    sampler = fit_dict["sampler"]
+
+    cube_plot_name = f"{plot_name}_{i}_{j}"
+    plot_step(
+        sampler,
+        plot_name=cube_plot_name,
+        n_comp=n_comp_pix,
+    )
+
+    return True
+
+
+def plot_step(
+    sampler,
+    plot_name="step_plot",
+    n_comp=1,
+):
+    """Make a step plot"""
+
+    file_exts = get_dict_val(
+        glob_config["config"],
+        glob_config["config_defaults"],
+        table="plotting",
+        key="file_exts",
+    )
+
+    # Get samples from the chain
+    samples = sampler.get_chain()
+
+    # And get the nominal "burn-in" range to put on the
+    # plot
+    burn_in, _ = get_burn_in_thin(
+        sampler,
+        burn_in_frac=glob_config["burn_in"],
+        thin_frac=glob_config["thin"],
+    )
+
+    # Load up the labels
+    labels = []
+    for i in range(n_comp):
+        for label in glob_config["labels"]:
+            labels.append(label % i)
+
+    fig, axes = plt.subplots(
+        nrows=len(glob_config["labels"]),
+        ncols=n_comp,
+        squeeze=False,
+        figsize=(6 * n_comp, 2 * len(glob_config["labels"])),
+        sharex="all",
+    )
+    plt.subplots_adjust(hspace=0.1)
+
+    axes = axes.T.flatten()
+
+    colour = cycle(iter(plt.cm.rainbow(np.linspace(0, 1, len(glob_config["labels"])))))
+
+    ax_i = 0
+
+    for j in range(n_comp):
+
+        for i in range(len(glob_config["labels"])):
+
+            c = next(colour)
+
+            # sample_no = i * n_comp + j
+
+            ax = axes[ax_i]
+            ax.plot(samples[:, :, ax_i], c=c, alpha=0.3)
+            ax.set_xlim(0, len(samples))
+
+            ax.axvline(
+                burn_in,
+                color="k",
+                linestyle="--",
+            )
+
+            plt.text(
+                0.05,
+                0.9,
+                glob_config["labels"][i] % j,
+                ha="left",
+                va="top",
+                bbox=dict(facecolor="white", edgecolor="black", alpha=1),
+                transform=ax.transAxes,
+            )
+
+            if i == len(glob_config["labels"]) - 1:
+                ax.set_xlabel("Step Number")
+
+            ax_i += 1
+
+    for file_ext in file_exts:
+        if file_ext not in ALLOWED_FILE_EXTS:
+            logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
+            sys.exit()
+
+        plt.savefig(
+            f"{plot_name}.{file_ext}",
+            bbox_inches="tight",
+        )
+
+    plt.close()
+
+    return True
+
+
+def parallel_corner(
+    ij,
+    plot_name="corner",
+    fit_dict_filename=None,
+    n_comp=None,
+):
+    """Wrapper to parallelise corner plotting"""
+
+    if fit_dict_filename is None:
+        logger.warning("sampler_filename should be defined!")
+        sys.exit()
+    if n_comp is None:
+        logger.warning("n_comp should be defined!")
+        sys.exit()
+
+    i, j = ij[0], ij[1]
+    n_comp_pix = int(n_comp[i, j])
+
+    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+    if n_comp_pix == 0:
+        return True
+    fit_dict = load_fit_dict(cube_fit_dict_filename)
+
+    flat_samples = get_samples_from_fit_dict(
+        fit_dict,
+        burn_in_frac=glob_config["burn_in"],
+        thin_frac=glob_config["thin"],
+    )
+
+    cube_plot_name = f"{plot_name}_{i}_{j}"
+    plot_corner(
+        flat_samples,
+        plot_name=cube_plot_name,
+        n_comp=n_comp_pix,
+    )
+
+    return True
+
+
+def plot_corner(
+    flat_samples,
+    plot_name,
+    n_comp=1,
+):
+    """Make a corner plot"""
+
+    file_exts = get_dict_val(
+        glob_config["config"],
+        glob_config["config_defaults"],
+        table="plotting",
+        key="file_exts",
+    )
+
+    # Load up the labels
+    labels = []
+    for i in range(n_comp):
+        for label in glob_config["labels"]:
+            labels.append(label % i)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        corner.corner(
+            flat_samples,
+            labels=labels,
+            show_titles=True,
+            quantiles=[0.16, 0.5, 0.84],
+        )
+
+    for file_ext in file_exts:
+        if file_ext not in ALLOWED_FILE_EXTS:
+            logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
+            sys.exit()
+
+        plt.savefig(
+            f"{plot_name}.{file_ext}",
+            bbox_inches="tight",
+        )
+
+    plt.close()
+
+    return True
+
+
+def parallel_plot_fit(
+    ij,
+    fit_dict_filename=None,
+    loc_image=None,
+    n_comp=None,
+    plot_name="fit",
+    show_individual_components=True,
+    show_hyperfine_components=False,
+    n_points=1000,
+    n_draws=100,
+    figsize=(10, 4),
+    x_label=r"Velocity (km s$^{-1}$)",
+    y_label="Intensity (K)",
+):
+    """Wrapper to parallelise fit spectrum plotting"""
+
+    if fit_dict_filename is None:
+        logger.warning("fit_dict_filename should be defined!")
+        sys.exit()
+
+    if n_comp is None:
+        logger.warning("n_comp should be defined!")
+        sys.exit()
+
+    i, j = ij[0], ij[1]
+
+    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+    n_comp_pix = int(n_comp[i, j])
+    data = glob_data[:, i, j]
+    error = glob_error[:, i, j]
+    if n_comp_pix > 0:
+        fit_dict = load_fit_dict(cube_fit_dict_filename)
+
+        flat_samples = get_samples_from_fit_dict(
+            fit_dict,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+
+    else:
+        flat_samples = None
+    cube_plot_name = f"{plot_name}_{i}_{j}"
+
+    # Figure out the optimum figure size
+    if loc_image is not None:
+        ratio = loc_image.shape[0] / loc_image.shape[1]
+        figsize = (3 * 5, 5 * ratio)
+
+    else:
+        figsize = figsize
+
+    plot_fit(
+        flat_samples=flat_samples,
+        data=data,
+        error=error,
+        loc_image=loc_image,
+        i=i,
+        j=j,
+        n_comp=n_comp_pix,
+        plot_name=cube_plot_name,
+        show_individual_components=show_individual_components,
+        show_hyperfine_components=show_hyperfine_components,
+        n_points=n_points,
+        n_draws=n_draws,
+        figsize=figsize,
+        x_label=x_label,
+        y_label=y_label,
+    )
+
+
+def plot_fit(
+    flat_samples,
+    data,
+    error,
+    loc_image=None,
+    i=None,
+    j=None,
+    n_comp=1,
+    plot_name="fit",
+    show_individual_components=True,
+    show_hyperfine_components=False,
+    n_points=1000,
+    n_draws=100,
+    figsize=(10, 4),
+    x_label=r"Velocity (km s$^{-1}$)",
+    y_label="Intensity (K)",
+):
+    """Plot a fit spectrum"""
+
+    file_exts = get_dict_val(
+        glob_config["config"],
+        glob_config["config_defaults"],
+        table="plotting",
+        key="file_exts",
+    )
+
+    vel_min, vel_max = np.nanmin(glob_vel), np.nanmax(glob_vel)
+
+    vel_plot_mcmc = np.linspace(vel_min, vel_max, n_points)
+
+    fit_percentiles_components = None
+    if flat_samples is not None:
+        fit_mcmc = get_fits_from_samples(
+            samples=flat_samples,
+            vel=vel_plot_mcmc,
+            props=glob_config["props"],
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            fit_type=glob_config["fit_type"],
+            n_draws=n_draws,
+            n_comp=n_comp,
+        )
+        fit_chisq = get_fits_from_samples(
+            samples=flat_samples,
+            vel=glob_vel,
+            props=glob_config["props"],
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            fit_type=glob_config["fit_type"],
+            n_draws=n_draws,
+            n_comp=n_comp,
+        )
+        model = np.nanmedian(np.nansum(fit_chisq, axis=-1), axis=1)
+
+        if show_individual_components:
+            fit_percentiles_components = np.nanpercentile(
+                fit_mcmc, [50, 16, 84], axis=1
+            )
+        fit_percentiles = np.nanpercentile(
+            np.nansum(fit_mcmc, axis=-1), [50, 16, 84], axis=1
+        )
+    else:
+        fit_percentiles = np.zeros([3, n_points])
+        model = np.zeros_like(glob_vel)
+
+    # Calculate reduced chisq
+    chisq = chi_square(data, model, observed_error=error)
+    deg_freedom = len(data[~np.isnan(data)]) - (n_comp * len(glob_config["props"]))
+    chisq_red = chisq / deg_freedom
+
+    fig = plt.figure(figsize=figsize)
+
+    if loc_image is not None:
+        gs = GridSpec(1, 3, figure=fig)
+        ax = fig.add_subplot(gs[0, :-1])
+    else:
+        gs = GridSpec(1, 1, figure=fig)
+        ax = fig.add_subplot(gs[0, 0])
+
+    plt.step(
+        glob_vel,
+        data,
+        where="mid",
+        c="k",
+    )
+
+    y_lim = plt.ylim()
+    y_min, y_max = y_lim[0], 1.2 * np.nanmax(data)
+
+    plt.plot(vel_plot_mcmc, fit_percentiles[0, :], c="r", zorder=99)
+    if flat_samples is not None:
+        plt.fill_between(
+            vel_plot_mcmc,
+            fit_percentiles[1, :],
+            fit_percentiles[2, :],
+            color="r",
+            alpha=0.75,
+            zorder=99,
+        )
+
+        if show_individual_components and fit_percentiles_components is not None:
+            plt.plot(
+                vel_plot_mcmc,
+                fit_percentiles_components[0, :, :],
+                c="k",
+            )
+            for i_fit_percentiles in range(fit_percentiles_components.shape[-1]):
+                plt.fill_between(
+                    vel_plot_mcmc,
+                    fit_percentiles_components[1, :, i_fit_percentiles],
+                    fit_percentiles_components[2, :, i_fit_percentiles],
+                    color="k",
+                    alpha=0.75,
+                )
+
+    plt.xlim([vel_min, vel_max])
+    plt.ylim([y_min, y_max])
+
+    ax.xaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
+    ax.yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
+
+    plt.grid()
+
+    plt.text(
+        0.95,
+        0.95,
+        rf"$\chi_\nu^2={chisq_red:.2f}$",
+        ha="right",
+        va="top",
+        bbox=dict(facecolor="white", edgecolor="black", alpha=1),
+        transform=ax.transAxes,
+    )
+
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+
+    if loc_image is not None:
+        ax = fig.add_subplot(gs[0, -1])
+
+        vmin, vmax = np.nanpercentile(loc_image, [1, 99])
+
+        ax.imshow(
+            loc_image,
+            origin="lower",
+            vmin=vmin,
+            vmax=vmax,
+            cmap="inferno",
+        )
+
+        # Put a cross on the image to show where the pixel is
+        if i is not None and j is not None:
+            plt.scatter(
+                j,
+                i,
+                c="lime",
+                marker="x",
+            )
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        ax.yaxis.tick_right()
+        ax.yaxis.set_label_position("right")
+
+        plt.subplots_adjust(hspace=0, wspace=0)
+
+    else:
+        plt.tight_layout()
+
+    for file_ext in file_exts:
+        if file_ext not in ALLOWED_FILE_EXTS:
+            logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
+            sys.exit()
+
+        plt.savefig(
+            f"{plot_name}.{file_ext}",
+            bbox_inches="tight",
+        )
+
+    plt.close()
 
 
 class HyperfinePlotter(HyperfineFitter):
@@ -51,6 +527,31 @@ class HyperfinePlotter(HyperfineFitter):
         """
 
         HyperfineFitter.__init__(**locals())
+
+        # Define global variables for potentially huge arrays
+        global glob_data, glob_error, glob_vel
+        glob_data = data
+        glob_error = error
+        glob_vel = vel
+
+        global glob_config
+
+        # Define a global configuration dictionary that we'll use in multiprocessing
+        global glob_config
+
+        keys_to_glob = [
+            "config_defaults",
+            "config",
+            "props",
+            "labels",
+            "strength_lines",
+            "v_lines",
+            "fit_type",
+            "burn_in",
+            "thin",
+        ]
+        for k in keys_to_glob:
+            glob_config[k] = self.__dict__[k]
 
     def plot_step(
         self,
@@ -104,7 +605,7 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 return True
 
-            self.step(
+            plot_step(
                 sampler,
                 plot_name,
                 n_comp=n_comp,
@@ -143,7 +644,7 @@ class HyperfinePlotter(HyperfineFitter):
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_step,
+                                parallel_step,
                                 plot_name=plot_name,
                                 fit_dict_filename=fit_dict_filename,
                                 n_comp=n_comp,
@@ -154,133 +655,6 @@ class HyperfinePlotter(HyperfineFitter):
                         total=len(ij_list),
                     )
                 )
-
-        return True
-
-    def parallel_step(
-        self,
-        ij,
-        plot_name="step",
-        fit_dict_filename="fit_dict",
-        n_comp=None,
-    ):
-        """Wrapper to parallelise step plotting"""
-
-        if n_comp is None:
-            raise Warning("n_comp should be defined!")
-
-        i, j = ij[0], ij[1]
-
-        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-
-        n_comp_pix = int(n_comp[i, j])
-        if n_comp_pix == 0:
-            return
-        fit_dict = load_fit_dict(cube_fit_dict_filename)
-
-        if "sampler" not in fit_dict:
-            self.logger.warning(
-                "Can only produce step plots when emcee sampler is present"
-            )
-            return False
-        sampler = fit_dict["sampler"]
-
-        cube_plot_name = f"{plot_name}_{i}_{j}"
-        self.step(
-            sampler,
-            plot_name=cube_plot_name,
-            n_comp=n_comp_pix,
-        )
-
-        return True
-
-    def step(
-        self,
-        sampler,
-        plot_name="step_plot",
-        n_comp=1,
-    ):
-        """Make a step plot"""
-
-        file_exts = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="plotting",
-            key="file_exts",
-        )
-
-        # Get samples from the chain
-        samples = sampler.get_chain()
-
-        # And get the nominal "burn-in" range to put on the
-        # plot
-        burn_in, _ = self.get_burn_in_thin(sampler)
-
-        # Load up the labels
-        labels = []
-        for i in range(n_comp):
-            for label in self.labels:
-                labels.append(label % i)
-
-        fig, axes = plt.subplots(
-            nrows=len(self.labels),
-            ncols=n_comp,
-            squeeze=False,
-            figsize=(6 * n_comp, 2 * len(self.labels)),
-            sharex="all",
-        )
-        plt.subplots_adjust(hspace=0.1)
-
-        axes = axes.T.flatten()
-
-        colour = cycle(iter(plt.cm.rainbow(np.linspace(0, 1, len(self.labels)))))
-
-        ax_i = 0
-
-        for j in range(n_comp):
-
-            for i in range(len(self.labels)):
-
-                c = next(colour)
-
-                # sample_no = i * n_comp + j
-
-                ax = axes[ax_i]
-                ax.plot(samples[:, :, ax_i], c=c, alpha=0.3)
-                ax.set_xlim(0, len(samples))
-
-                ax.axvline(
-                    burn_in,
-                    color="k",
-                    linestyle="--",
-                )
-
-                plt.text(
-                    0.05,
-                    0.9,
-                    self.labels[i] % j,
-                    ha="left",
-                    va="top",
-                    bbox=dict(facecolor="white", edgecolor="black", alpha=1),
-                    transform=ax.transAxes,
-                )
-
-                if i == len(self.labels) - 1:
-                    ax.set_xlabel("Step Number")
-
-                ax_i += 1
-
-        for file_ext in file_exts:
-            if file_ext not in ALLOWED_FILE_EXTS:
-                self.logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
-                sys.exit()
-
-            plt.savefig(
-                f"{plot_name}.{file_ext}",
-                bbox_inches="tight",
-            )
-
-        plt.close()
 
         return True
 
@@ -329,9 +703,13 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 return
 
-            flat_samples = self.get_samples_from_fit_dict(fit_dict)
+            flat_samples = get_samples_from_fit_dict(
+                fit_dict,
+                burn_in_frac=self.burn_in,
+                thin_frac=self.thin,
+            )
 
-            self.corner(
+            plot_corner(
                 flat_samples=flat_samples,
                 plot_name=plot_name,
                 n_comp=n_comp,
@@ -370,7 +748,7 @@ class HyperfinePlotter(HyperfineFitter):
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_corner,
+                                parallel_corner,
                                 plot_name=plot_name,
                                 fit_dict_filename=fit_dict_filename,
                                 n_comp=n_comp,
@@ -381,79 +759,6 @@ class HyperfinePlotter(HyperfineFitter):
                         total=len(ij_list),
                     )
                 )
-
-    def parallel_corner(
-        self,
-        ij,
-        plot_name="corner",
-        fit_dict_filename=None,
-        n_comp=None,
-    ):
-        """Wrapper to parallelise corner plotting"""
-
-        if fit_dict_filename is None:
-            self.logger.warning("sampler_filename should be defined!")
-            sys.exit()
-        if n_comp is None:
-            self.logger.warning("n_comp should be defined!")
-            sys.exit()
-
-        i, j = ij[0], ij[1]
-        n_comp_pix = int(n_comp[i, j])
-
-        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-        if n_comp_pix == 0:
-            return
-        fit_dict = load_fit_dict(cube_fit_dict_filename)
-
-        flat_samples = self.get_samples_from_fit_dict(fit_dict)
-
-        cube_plot_name = f"{plot_name}_{i}_{j}"
-        self.corner(flat_samples, plot_name=cube_plot_name, n_comp=n_comp_pix)
-
-    def corner(
-        self,
-        flat_samples,
-        plot_name,
-        n_comp=1,
-    ):
-        """Make a corner plot"""
-
-        file_exts = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="plotting",
-            key="file_exts",
-        )
-
-        # Load up the labels
-        labels = []
-        for i in range(n_comp):
-            for label in self.labels:
-                labels.append(label % i)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            corner.corner(
-                flat_samples,
-                labels=labels,
-                show_titles=True,
-                quantiles=[0.16, 0.5, 0.84],
-            )
-
-        for file_ext in file_exts:
-            if file_ext not in ALLOWED_FILE_EXTS:
-                self.logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
-                sys.exit()
-
-            plt.savefig(
-                f"{plot_name}.{file_ext}",
-                bbox_inches="tight",
-            )
-
-        plt.close()
-
-        return True
 
     def plot_fit(
         self,
@@ -558,7 +863,11 @@ class HyperfinePlotter(HyperfineFitter):
             if n_comp == 0:
                 flat_samples = None
             else:
-                flat_samples = self.get_samples_from_fit_dict(fit_dict)
+                flat_samples = get_samples_from_fit_dict(
+                    fit_dict,
+                    burn_in_frac=self.burn_in,
+                    thin_frac=self.thin,
+                )
 
             self.fit(
                 flat_samples=flat_samples,
@@ -600,7 +909,7 @@ class HyperfinePlotter(HyperfineFitter):
                     tqdm(
                         pool.imap(
                             partial(
-                                self.parallel_plot_fit,
+                                parallel_plot_fit,
                                 fit_dict_filename=fit_dict_filename,
                                 plot_name=plot_name,
                                 loc_image=loc_image,
@@ -619,243 +928,3 @@ class HyperfinePlotter(HyperfineFitter):
                         total=len(ij_list),
                     )
                 )
-
-    def parallel_plot_fit(
-        self,
-        ij,
-        fit_dict_filename=None,
-        loc_image=None,
-        n_comp=None,
-        plot_name="fit",
-        show_individual_components=True,
-        show_hyperfine_components=False,
-        n_points=1000,
-        n_draws=100,
-        figsize=(10, 4),
-        x_label=r"Velocity (km s$^{-1}$)",
-        y_label="Intensity (K)",
-    ):
-        """Wrapper to parallelise fit spectrum plotting"""
-
-        if fit_dict_filename is None:
-            self.logger.warning("fit_dict_filename should be defined!")
-            sys.exit()
-
-        if n_comp is None:
-            self.logger.warning("n_comp should be defined!")
-            sys.exit()
-
-        i, j = ij[0], ij[1]
-
-        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-        n_comp_pix = int(n_comp[i, j])
-        data = self.data[:, i, j]
-        error = self.error[:, i, j]
-        if n_comp_pix > 0:
-            fit_dict = load_fit_dict(cube_fit_dict_filename)
-
-            flat_samples = self.get_samples_from_fit_dict(fit_dict)
-
-        else:
-            flat_samples = None
-        cube_plot_name = f"{plot_name}_{i}_{j}"
-
-        # Figure out the optimum figure size
-        if loc_image is not None:
-            ratio = loc_image.shape[0] / loc_image.shape[1]
-            figsize = (3 * 5, 5 * ratio)
-
-        else:
-            figsize = figsize
-
-        self.fit(
-            flat_samples=flat_samples,
-            data=data,
-            error=error,
-            loc_image=loc_image,
-            i=i,
-            j=j,
-            n_comp=n_comp_pix,
-            plot_name=cube_plot_name,
-            show_individual_components=show_individual_components,
-            show_hyperfine_components=show_hyperfine_components,
-            n_points=n_points,
-            n_draws=n_draws,
-            figsize=figsize,
-            x_label=x_label,
-            y_label=y_label,
-        )
-
-    def fit(
-        self,
-        flat_samples,
-        data,
-        error,
-        loc_image=None,
-        i=None,
-        j=None,
-        n_comp=1,
-        plot_name="fit",
-        show_individual_components=True,
-        show_hyperfine_components=False,
-        n_points=1000,
-        n_draws=100,
-        figsize=(10, 4),
-        x_label=r"Velocity (km s$^{-1}$)",
-        y_label="Intensity (K)",
-    ):
-        """Plot a fit spectrum"""
-
-        file_exts = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="plotting",
-            key="file_exts",
-        )
-
-        vel_min, vel_max = np.nanmin(self.vel), np.nanmax(self.vel)
-
-        vel_plot_mcmc = np.linspace(vel_min, vel_max, n_points)
-
-        fit_percentiles_components = None
-        if flat_samples is not None:
-            fit_mcmc = super(HyperfinePlotter, self).get_fits_from_samples(
-                samples=flat_samples,
-                vel=vel_plot_mcmc,
-                n_draws=n_draws,
-                n_comp=n_comp,
-            )
-            fit_chisq = super(HyperfinePlotter, self).get_fits_from_samples(
-                samples=flat_samples,
-                vel=self.vel,
-                n_draws=n_draws,
-                n_comp=n_comp,
-            )
-            model = np.nanmedian(np.nansum(fit_chisq, axis=-1), axis=1)
-
-            if show_individual_components:
-                fit_percentiles_components = np.nanpercentile(
-                    fit_mcmc, [50, 16, 84], axis=1
-                )
-            fit_percentiles = np.nanpercentile(
-                np.nansum(fit_mcmc, axis=-1), [50, 16, 84], axis=1
-            )
-        else:
-            fit_percentiles = np.zeros([3, n_points])
-            model = np.zeros_like(self.vel)
-
-        # Calculate reduced chisq
-        chisq = chi_square(data, model, observed_error=error)
-        deg_freedom = len(data[~np.isnan(data)]) - (n_comp * len(self.props))
-        chisq_red = chisq / deg_freedom
-
-        fig = plt.figure(figsize=figsize)
-
-        if loc_image is not None:
-            gs = GridSpec(1, 3, figure=fig)
-            ax = fig.add_subplot(gs[0, :-1])
-        else:
-            gs = GridSpec(1, 1, figure=fig)
-            ax = fig.add_subplot(gs[0, 0])
-
-        plt.step(
-            self.vel,
-            data,
-            where="mid",
-            c="k",
-        )
-
-        y_lim = plt.ylim()
-        y_min, y_max = y_lim[0], 1.2 * np.nanmax(data)
-
-        plt.plot(vel_plot_mcmc, fit_percentiles[0, :], c="r", zorder=99)
-        if flat_samples is not None:
-            plt.fill_between(
-                vel_plot_mcmc,
-                fit_percentiles[1, :],
-                fit_percentiles[2, :],
-                color="r",
-                alpha=0.75,
-                zorder=99,
-            )
-
-            if show_individual_components and fit_percentiles_components is not None:
-                plt.plot(
-                    vel_plot_mcmc,
-                    fit_percentiles_components[0, :, :],
-                    c="k",
-                )
-                for i_fit_percentiles in range(fit_percentiles_components.shape[-1]):
-                    plt.fill_between(
-                        vel_plot_mcmc,
-                        fit_percentiles_components[1, :, i_fit_percentiles],
-                        fit_percentiles_components[2, :, i_fit_percentiles],
-                        color="k",
-                        alpha=0.75,
-                    )
-
-        plt.xlim([vel_min, vel_max])
-        plt.ylim([y_min, y_max])
-
-        ax.xaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
-        ax.yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
-
-        plt.grid()
-
-        plt.text(
-            0.95,
-            0.95,
-            rf"$\chi_\nu^2={chisq_red:.2f}$",
-            ha="right",
-            va="top",
-            bbox=dict(facecolor="white", edgecolor="black", alpha=1),
-            transform=ax.transAxes,
-        )
-
-        plt.xlabel(x_label)
-        plt.ylabel(y_label)
-
-        if loc_image is not None:
-            ax = fig.add_subplot(gs[0, -1])
-
-            vmin, vmax = np.nanpercentile(loc_image, [1, 99])
-
-            ax.imshow(
-                loc_image,
-                origin="lower",
-                vmin=vmin,
-                vmax=vmax,
-                cmap="inferno",
-            )
-
-            # Put a cross on the image to show where the pixel is
-            if i is not None and j is not None:
-                plt.scatter(
-                    j,
-                    i,
-                    c="lime",
-                    marker="x",
-                )
-
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-            ax.yaxis.tick_right()
-            ax.yaxis.set_label_position("right")
-
-            plt.subplots_adjust(hspace=0, wspace=0)
-
-        else:
-            plt.tight_layout()
-
-        for file_ext in file_exts:
-            if file_ext not in ALLOWED_FILE_EXTS:
-                self.logger.warning(f"file_ext should be one of {ALLOWED_FILE_EXTS}")
-                sys.exit()
-
-            plt.savefig(
-                f"{plot_name}.{file_ext}",
-                bbox_inches="tight",
-            )
-
-        plt.close()
