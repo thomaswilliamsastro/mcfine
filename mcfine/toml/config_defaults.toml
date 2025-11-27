@@ -27,7 +27,7 @@ progress = true
 fit_dict_filename = "fit_dict"
 n_comp_filename = "n_comp"
 likelihood_filename = "likelihood"
-chunksize = 16
+chunksize = 1
 save = true
 progress = true
 
@@ -62,14 +62,14 @@ max_steps = 100000
 [create_fit_cube]
 
 cube_filename = "fit_cube"
-chunksize = 64
+chunksize = 1
 
 [make_parameter_maps]
 
 maps_filename = "maps"
 cov_filename = "covariance"
 n_samples = 500
-chunksize = 256
+chunksize = 1
 
 [overwrites]
 

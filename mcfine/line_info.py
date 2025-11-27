@@ -43,7 +43,7 @@ freq_lines = {
 }
 
 # Line velocities
-v_lines = {
+v_lines_dict = {
     "n2hp10_01": -7.9930,
     "n2hp10_04": -0.6112,
     "n2hp10_07": 0.0000,
@@ -56,7 +56,7 @@ v_lines = {
 }
 
 # Relative line strengths
-strength_lines = {
+strength_lines_dict = {
     "n2hp10_01": 0.025957 + 0.065372 + 0.019779,
     "n2hp10_04": 0.004376 + 0.034890 + 0.071844,
     "n2hp10_07": 0.259259,
