@@ -2439,6 +2439,11 @@ class HyperfineFitter:
                 logger=self.logger,
             )
 
+        # Create output directory if it doesn't exist
+        fit_dict_base_dir = os.path.dirname(fit_dict_filename)
+        if not os.path.exists(fit_dict_base_dir):
+            os.makedirs(fit_dict_base_dir)
+
         chunksize = get_dict_val(
             self.config,
             self.config_defaults,
@@ -2679,6 +2684,10 @@ class HyperfineFitter:
             if self.mask[i, j] != 0
         ]
 
+        # Set up a dictionary to record best-fit parameters, to
+        # reduce I/O
+        fit_params = {}
+
         for ij in tqdm(ij_list):
 
             i, j = ij[0], ij[1]
@@ -2723,35 +2732,47 @@ class HyperfineFitter:
                         n_comp_new = int(n_comp[i_full, j_full])
                         if n_comp_new > 0:
 
-                            # Check if we already have moved the sampler file
-                            cutout_fit_dict_filename = os.path.join(
-                                output_dir,
-                                f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
-                            )
+                            # If we haven't already looked at this one, pull in
+                            # the fit dictionary
 
-                            if not os.path.exists(cutout_fit_dict_filename):
+                            fit_params_key = f"{i_full}_{j_full}"
+
+                            if fit_params_key not in fit_params:
+
+                                # Check if we already have moved the sampler file
                                 cutout_fit_dict_filename = os.path.join(
-                                    input_dir,
+                                    output_dir,
                                     f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
                                 )
-                            cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
 
-                            # If we have the full emcee sampler, prefer that here
-                            if "sampler" in cutout_fit_dict:
-                                cutout_sampler = cutout_fit_dict["sampler"]
-                                flat_samples = get_samples(
-                                    cutout_sampler,
-                                    burn_in_frac=self.burn_in,
-                                    thin_frac=self.thin,
-                                )
-                                pars_new = np.nanmedian(
-                                    flat_samples,
-                                    axis=0,
-                                )
+                                if not os.path.exists(cutout_fit_dict_filename):
+                                    cutout_fit_dict_filename = os.path.join(
+                                        input_dir,
+                                        f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
+                                    )
+                                cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
 
-                            # Else we have these calculated as part of the covariance matrix
+                                # If we have the full emcee sampler, prefer that here
+                                if "sampler" in cutout_fit_dict:
+                                    cutout_sampler = cutout_fit_dict["sampler"]
+                                    flat_samples = get_samples(
+                                        cutout_sampler,
+                                        burn_in_frac=self.burn_in,
+                                        thin_frac=self.thin,
+                                    )
+                                    pars_new = np.nanmedian(
+                                        flat_samples,
+                                        axis=0,
+                                    )
+
+                                # Else we have these calculated as part of the covariance matrix
+                                else:
+                                    pars_new = copy.deepcopy(cutout_fit_dict["cov"]["med"])
+
+                                fit_params[fit_params_key] = copy.deepcopy(pars_new)
+
                             else:
-                                pars_new = copy.deepcopy(cutout_fit_dict["cov"]["med"])
+                                pars_new = fit_params.get(fit_params_key)
 
                             like_new = ln_like(
                                 theta=pars_new,
@@ -2817,6 +2838,27 @@ class HyperfineFitter:
                     updated_fit_dict = load_fit_dict(input_file)
                     updated_fit_dict["likelihood"] = likelihood[i, j]
                     save_fit_dict(updated_fit_dict, output_file)
+
+                    # Update the fit parameters dictionary
+                    # If we have the full emcee sampler, prefer that here
+                    if "sampler" in updated_fit_dict:
+                        cutout_sampler = updated_fit_dict["sampler"]
+                        flat_samples = get_samples(
+                            cutout_sampler,
+                            burn_in_frac=self.burn_in,
+                            thin_frac=self.thin,
+                        )
+                        pars_new = np.nanmedian(
+                            flat_samples,
+                            axis=0,
+                        )
+
+                    # Else we have these calculated as part of the covariance matrix
+                    else:
+                        pars_new = copy.deepcopy(updated_fit_dict["cov"]["med"])
+
+                    fit_param_key = f"{i}_{j}"
+                    fit_params[fit_param_key] = copy.deepcopy(pars_new)
 
                 # Move the right file to the new directory. Use hardlinks to minimize space if possible
                 else:
