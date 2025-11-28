@@ -6,6 +6,7 @@ Changelog
 0.3.1 (Unreleased)
 ==================
 
+* Improve spatial coherence speed by saving parameters to dictionary, reducing I/O
 * Big refactor to improve speed and RAM usage by using global variables
 * Add option to initially fit to downsampled data
 * Fix crash when autocorrelation time is NaN
