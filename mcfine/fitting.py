@@ -1004,8 +1004,10 @@ def run_mcmc(
                         flux_threshold=flux_threshold,
                     )
 
-                    # Only take emission lines
-                    found_lines = found_lines[found_lines["line_type"] == "emission"]
+                    # Only take emission lines if we have any, else take everything
+                    emission_lines = found_lines[found_lines["line_type"] == "emission"]
+                    if len(emission_lines) > 0:
+                        found_lines = copy.deepcopy(emission_lines)
 
                     # Now take these lines and order by flux
                     found_line_fluxes = np.array(
