@@ -6,6 +6,7 @@ Changelog
 0.3.1 (Unreleased)
 ==================
 
+* Automatically resize tqdm progress bar
 * Fix crash if no emission lines are found in spectrum when doing derivative spectroscopy
 * Improve spatial coherence speed by saving parameters to dictionary, reducing I/O
 * Big refactor to improve speed and RAM usage by using global variables
