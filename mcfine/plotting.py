@@ -653,6 +653,7 @@ class HyperfinePlotter(HyperfineFitter):
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )
 
@@ -757,6 +758,7 @@ class HyperfinePlotter(HyperfineFitter):
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )
 
@@ -926,5 +928,6 @@ class HyperfinePlotter(HyperfineFitter):
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )

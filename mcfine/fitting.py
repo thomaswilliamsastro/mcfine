@@ -2572,6 +2572,7 @@ class HyperfineFitter:
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )
 
@@ -2690,7 +2691,9 @@ class HyperfineFitter:
         # reduce I/O
         fit_params = {}
 
-        for ij in tqdm(ij_list):
+        for ij in tqdm(ij_list,
+                       dynamic_ncols=True,
+                       ):
 
             i, j = ij[0], ij[1]
 
@@ -2962,6 +2965,7 @@ class HyperfineFitter:
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )
 
@@ -3113,6 +3117,7 @@ class HyperfineFitter:
                             chunksize=chunksize,
                         ),
                         total=len(ij_list),
+                        dynamic_ncols=True,
                     )
                 )
 
