@@ -46,14 +46,6 @@ are not strictly necessary. We also set up some directories for the individual f
        err = err_hdu[0].data
        mask = mask_hdu[0].data
 
-       # Also get velocity informations
-       vel_delt = hdu[0].header["CDELT3"]
-       vel_val = hdu[0].header["CRVAL3"]
-       vel_pix = hdu[0].header["CRPIX3"]
-
-       velocity = np.array([vel_val + (i - (vel_pix - 1)) * vel_delt for i in range(hdu.data.shape[0])])
-       velocity /= 1e3
-
 We'll set the data up to be read properly into ``mcfine`` now. This involves generating error maps and a mask of
 pixels to fit:
 
@@ -70,14 +62,14 @@ pixels to fit:
 
     nan_mask = np.where(mask == 0)
 
-We can now throw this all into ``mcfine``!
+We can now throw this all into ``mcfine``! We'll pass the ``data`` here as the path to the .fits file, as that will
+tell ``mcfine`` to load this in using spectral cube (and also extract the velocity axis).
 
 .. code-block:: python
 
     from mcfine import HyperfineFitter
 
-    hf_fitter = HyperfineFitter(data=data,
-                                vel=velocity,
+    hf_fitter = HyperfineFitter(data=hdu_name,
                                 error=err,
                                 mask=mask,
                                 config_file=config_file,
