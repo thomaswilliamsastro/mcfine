@@ -505,9 +505,9 @@ class HyperfinePlotter(HyperfineFitter):
     def __init__(
         self,
         data=None,
-        vel=None,
         error=None,
         mask=None,
+        vel=None,
         config_file=None,
         local_file=None,
     ):
@@ -516,12 +516,14 @@ class HyperfinePlotter(HyperfineFitter):
         Allows for plotting step/corner/fit spectrum plots, in a publication-ready format
 
         Args:
-            data (np.ndarray): Either a 1D array of intensity (spectrum) or a 3D array of intensities (cube).
-                Intensities should be in K.
-            vel (np.ndarray): Array of velocity values that correspond to data, in km/s.
-            error (np.ndarray): Array of errors in intensity. Should have the same shape as `data`. Defaults to None.
+            data (np.ndarray): Either a 1D array of intensity (spectrum), a 3D array of intensities (cube), or a string,
+                which will load in a cube using spectral_cube. If an array, intensities should be in K.
+            error (np.ndarray): Array of errors in intensity, or a string to load in using spectral_cube.
+                Should have the same shape as `data`. Defaults to None.
             mask (np.ndarray): 1/0 mask to indicate significant emission in the cube (i.e. the pixels to fit). Should
                 have shape of `data.shape[1:]`. Defaults to None, which will fit all pixels in a cube.
+            vel (np.ndarray): Array of velocity values that correspond to data, in km/s. Not required if loading in
+                a spectral cube. Defaults to None.
             config_file (str): Path to config.toml file. Defaults to None, which will use the default settings
             local_file (str): Path to local.toml file. Defaults to None, which will use the default settings
         """
@@ -530,11 +532,9 @@ class HyperfinePlotter(HyperfineFitter):
 
         # Define global variables for potentially huge arrays
         global glob_data, glob_error, glob_vel
-        glob_data = data
-        glob_error = error
-        glob_vel = vel
-
-        global glob_config
+        glob_data = self.data
+        glob_error = self.error
+        glob_vel = self.vel
 
         # Define a global configuration dictionary that we'll use in multiprocessing
         global glob_config
