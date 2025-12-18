@@ -2,10 +2,12 @@
 Changelog
 #########
 
-==================
-0.3.1 (Unreleased)
-==================
+================
+0.4 (Unreleased)
+================
 
+* Fix bug in the BIC looping where the wrong BIC/AIC could be used
+* Move to a more cohesive overall pkl data structure
 * Move to using spectral_cube
 * Automatically resize tqdm progress bar
 * Fix crash if no emission lines are found in spectrum when doing derivative spectroscopy

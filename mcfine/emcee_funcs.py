@@ -97,8 +97,8 @@ def get_samples_from_fit_dict(
     # Otherwise, sample from the covariance matrix
     else:
 
-        cov_matrix = fit_dict["cov"]["matrix"]
-        cov_med = fit_dict["cov"]["med"]
+        cov_matrix = fit_dict["cov_matrix"]
+        cov_med = fit_dict["cov_med"]
         flat_samples = np.random.multivariate_normal(cov_med, cov_matrix, size=10000)
 
     return flat_samples

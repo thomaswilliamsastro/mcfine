@@ -2,6 +2,7 @@
 lmfit_method = "default"
 fit_type = "lte"
 fit_method = "mcmc"
+consolidate_fit_dict = true
 keep_sampler = true
 keep_covariance = true
 
@@ -24,9 +25,8 @@ progress = true
 
 [multicomponent_fitter]
 
+mcfine_output_filename = "mcfine"
 fit_dict_filename = "fit_dict"
-n_comp_filename = "n_comp"
-likelihood_filename = "likelihood"
 chunksize = 1
 save = true
 progress = true
@@ -67,9 +67,6 @@ chunksize = 1
 [make_parameter_maps]
 
 maps_filename = "maps"
-cov_filename = "covariance"
-n_samples = 500
-chunksize = 1
 
 [overwrites]
 

@@ -10,8 +10,11 @@ which is a dictionary that we can pull things out of:
 
     maps = hf_fitter.parameter_maps
 
-    # Get the reduced chi-square
+    # Get the reduced chi-square if it's a numpy array
     chisq_red = maps["chisq_red"]
+
+    # Or if you've input a fits file to start with, then this will be a fits image
+    chisq_red = maps["chisq_red"].data
 
 You can then plot this up however you might like:
 
@@ -19,7 +22,8 @@ You can then plot this up however you might like:
 
 The fitted parameters (and errors) are also in here as ``[param]_[comp_no]``, ``[param]_[comp_no]_err_up``, and
 ``[param]_[comp_no]_err_down``. Note these don't take into account the covariances, if you want to properly sample
-for the purposes of a plot then you'll need the full set of walkers, which are saved in individual fit dictionary files.
+for the purposes of a plot then you'll need the full set of walkers, which can be saved in individual fit dictionary
+files.
 
 You can also plot things in much the same way as in the :doc:`single spectra plotting <plotting_a_spectrum>` way,
 except you can also provide a grid to cut down the number of plots created. For example:
@@ -36,17 +40,25 @@ except you can also provide a grid to cut down the number of plots created. For 
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
 
+    mcfine_fitting_filename = os.path.join(
+            fit_dir, f"mcfine_fit_backward",
+        )
+
     hf_plotter.plot_step(plot_name=os.path.join(fit_dir, plot_dir, f"{target}_step"),
-                         fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
+                         mcfine_output_filename=mcfine_output_filename,
+                         #fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                          n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
                          grid=grid)
     hf_plotter.plot_corner(plot_name=os.path.join(plot_dir, f"{target}_corner"),
-                           fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
-                           n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
+                           mcfine_output_filename=mcfine_output_filename,
+                           #fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                            grid=grid)
-    hf_plotter.plot_fit(plot_name=os.path.join(plot_dir, f"{target}_fit"),
-                        fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
-                        n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
+    hf_plotter.plot_fit(plot_name=os.path.join(plot_dir, f"{target}"),
+                        mcfine_output_filename=mcfine_output_filename,
+                        #fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
                         grid=grid)
 
 .. image:: images/cube_fit.png
+
+Note here that you can either pass the full fit dictionary (``mcfine_output_filename``), or each individual fit
+dictionary (``fit_dict_filename``).
