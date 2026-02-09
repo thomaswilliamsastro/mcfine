@@ -1,4 +1,5 @@
 import copy
+import filecmp
 import glob
 import inspect
 import logging
@@ -14,6 +15,7 @@ import emcee
 import numpy as np
 import xarray
 from astropy import units as u
+from astropy.io import fits
 from lmfit import minimize, Parameters
 from scipy.interpolate import RegularGridInterpolator
 from spectral_cube import SpectralCube
@@ -54,8 +56,8 @@ from .radex_funcs import get_nearest_values
 from .utils import (
     get_dict_val,
     check_overwrite,
-    save_fit_dict,
-    load_fit_dict,
+    save_pkl,
+    load_pkl,
     CONFIG_DEFAULT_PATH,
     LOCAL_DEFAULT_PATH,
 )
@@ -66,7 +68,6 @@ from .vars import (
     ALLOWED_FIT_TYPES,
     ALLOWED_FIT_METHODS,
 )
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,7 +83,9 @@ glob_vel = np.array([])
 glob_downsampled_data = np.array([])
 glob_downsampled_error = np.array([])
 
-glob_initial_ncomp = np.array([])
+glob_initial_n_comp = np.array([])
+
+glob_mcfine_output = {}
 
 radex_grid = xarray.Dataset()
 
@@ -417,6 +420,90 @@ def ln_prob(
     return lp + like
 
 
+def calculate_goodness_of_fit(
+    data,
+    error,
+    best_fit_pars,
+    n_comp,
+):
+    """Calculate various goodness of fit metrics."""
+
+    m = len(data[~np.isnan(data)])
+    ln_m = np.log(m)
+    k = len(best_fit_pars)
+
+    if n_comp > 0:
+        total_model = multiple_components(
+            theta=best_fit_pars,
+            vel=glob_vel,
+            strength_lines=glob_config["strength_lines"],
+            v_lines=glob_config["v_lines"],
+            props=glob_config["props"],
+            n_comp=n_comp,
+            fit_type=glob_config["fit_type"],
+        )
+    else:
+        total_model = np.zeros_like(data)
+
+    chisq = chi_square(
+        data,
+        total_model,
+        error,
+    )
+
+    deg_freedom = m - k
+    chisq_red = chisq / deg_freedom
+
+    # log-likelihood, BIC, AIC from chi-square
+    likelihood = -0.5 * chisq
+    bic = k * ln_m - 2 * likelihood
+    aic = 2 * k - 2 * likelihood
+
+    goodness_of_fit_metrics = {
+        "likelihood": likelihood,
+        "bic": bic,
+        "aic": aic,
+        "chisq": chisq,
+        "deg_freedom": deg_freedom,
+        "chisq_red": chisq_red,
+    }
+
+    return goodness_of_fit_metrics
+
+
+def sample_tpeak_per_component(
+    samples,
+    n_comp,
+    n_samples=500,
+):
+    """Get a number of Tpeak samples per component"""
+
+    tpeak = np.zeros([n_samples, n_comp])
+    idx_offset = len(glob_config["props"])
+    for i in range(n_samples):
+        choice_idx = np.random.randint(0, samples.shape[0])
+        tpeak_i = [
+            np.nanmax(
+                multiple_components(
+                    theta=samples[
+                        choice_idx, idx_offset * j : idx_offset * j + idx_offset
+                    ],
+                    vel=glob_vel,
+                    strength_lines=glob_config["strength_lines"],
+                    v_lines=glob_config["v_lines"],
+                    props=glob_config["props"],
+                    n_comp=1,
+                    fit_type=glob_config["fit_type"],
+                )
+            )
+            for j in range(n_comp)
+        ]
+
+        tpeak[i, :] = copy.deepcopy(tpeak_i)
+
+    return tpeak
+
+
 def downsample(
     data,
     chunk_size=10,
@@ -425,43 +512,32 @@ def downsample(
     """Downsample data, given a function
 
     Args:
-        data: Data to downsample. Should be an image or a
+        data: Data to downsample. Should be an image
         chunk_size: Chunk size to downsample to
         func: Function to downsample using. Defaults to
             nanmean
     """
 
     if data.ndim == 2:
-        ii = np.arange(chunk_size, data.shape[0], chunk_size)
-        jj = np.arange(chunk_size, data.shape[1], chunk_size)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            downsampled_array = np.array(
-                [
-                    [
-                        func(i_split, axis=(0, 1))
-                        for i_split in np.array_split(j_split, ii, axis=0)
-                    ]
-                    for j_split in np.array_split(data, jj, axis=1)
-                ]
-            ).T
+        axes = (0, 1)
     elif data.ndim == 3:
-        ii = np.arange(chunk_size, data.shape[1], chunk_size)
-        jj = np.arange(chunk_size, data.shape[2], chunk_size)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            downsampled_array = np.array(
-                [
-                    [
-                        func(i_split, axis=(1, 2))
-                        for i_split in np.array_split(j_split, ii, axis=1)
-                    ]
-                    for j_split in np.array_split(data, jj, axis=2)
-                ]
-            ).T
+        axes = (1, 2)
     else:
         raise ValueError("Input to downsample should be a 2D or 3D array")
+
+    ii = np.arange(chunk_size, data.shape[axes[0]], chunk_size)
+    jj = np.arange(chunk_size, data.shape[axes[1]], chunk_size)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        downsampled_array = np.array(
+            [
+                [
+                    func(i_split, axis=axes)
+                    for i_split in np.array_split(j_split, ii, axis=axes[0])
+                ]
+                for j_split in np.array_split(data, jj, axis=axes[1])
+            ]
+        ).T
 
     return downsampled_array
 
@@ -470,7 +546,6 @@ def parallel_fitting(
     ij,
     fit_dict_filename="fit_dict",
     data_type="original",
-    save=True,
     overwrite=False,
 ):
     """Parallel function for MCMC fitting.
@@ -483,7 +558,6 @@ def parallel_fitting(
         fit_dict_filename (str): Base filename for MCMC ft pickle. Will append coordinates on afterward. Defaults
             to fit_dict.
         data_type: Data type to fit. Can be either "original" or "downsampled"
-        save (bool): Save out files? Defaults to True.
         overwrite (bool): Overwrite existing files? Defaults to False.
 
     Returns:
@@ -496,9 +570,9 @@ def parallel_fitting(
     i = ij[0]
     j = ij[1]
 
-    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}"
+    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
 
-    if not os.path.exists(f"{cube_fit_dict_filename}.pkl") or overwrite:
+    if not os.path.exists(cube_fit_dict_filename) or overwrite:
         logger.debug(f"Fitting {i}, {j}")
 
         if data_type == "original":
@@ -514,57 +588,34 @@ def parallel_fitting(
         if data.size == 0:
             raise ValueError("No data found!")
 
-        initial_ncomp = None
-        if glob_initial_ncomp.size != 0:
-            initial_ncomp = glob_initial_ncomp[i, j]
+        initial_n_comp = None
+        if glob_initial_n_comp.size != 0:
+            initial_n_comp = glob_initial_n_comp[i, j]
 
         # Limit to a single core to avoid weirdness
         with threadpool_limits(limits=1, user_api=None):
-            n_comp, likelihood, sampler, cov_matrix, cov_med = delta_bic_looper(
+            fit_dict = delta_bic_looper(
                 data=data,
                 error=error,
-                initial_ncomp=initial_ncomp,
+                initial_n_comp=initial_n_comp,
             )
 
-        if save:
+        if not glob_config["keep_sampler"]:
+            fit_dict.pop("sampler")
 
-            fit_dict = {
-                "n_comp": n_comp,
-                "likelihood": likelihood,
-                "sampler": None,
-                "cov": {},
-            }
-            if glob_config["keep_sampler"]:
-                fit_dict["sampler"] = sampler
-            else:
-                fit_dict.pop("sampler")
+        if not glob_config["keep_covariance"]:
+            fit_dict.pop("cov_matrix")
+            fit_dict.pop("cov_med")
 
-            if glob_config["keep_covariance"]:
-                fit_dict["cov"] = {
-                    "matrix": cov_matrix,
-                    "med": cov_med,
-                }
-            else:
-                fit_dict.pop("cov")
+        save_pkl(fit_dict, cube_fit_dict_filename)
 
-            save_fit_dict(fit_dict, f"{cube_fit_dict_filename}.pkl")
-
-    else:
-
-        fit_dict = load_fit_dict(f"{cube_fit_dict_filename}.pkl")
-
-        n_comp = fit_dict["n_comp"]
-        likelihood = fit_dict["likelihood"]
-
-    logger.debug(f"N components: {n_comp}, likelihood: {likelihood:.2f}")
-
-    return n_comp, likelihood
+    return cube_fit_dict_filename
 
 
 def delta_bic_looper(
     data,
     error,
-    initial_ncomp=None,
+    initial_n_comp=None,
     save=False,
     overwrite=True,
     progress=False,
@@ -578,7 +629,7 @@ def delta_bic_looper(
     Args:
         data: Observed data
         error: Observed error
-        initial_ncomp: Initial guess at number of components.
+        initial_n_comp: Initial guess at number of components.
             Defaults to None.
         save: Whether to save out or not, defaults to False
         overwrite: Whether to overwrite existing fits. Defaults to False
@@ -593,12 +644,14 @@ def delta_bic_looper(
     sampler_old = None
     likelihood_old = None
     sampler = None
+    best_fit_pars = None
+    best_fit_errs = None
     cov_matrix = None
     cov_med = None
     prop_len = len(glob_config["props"])
     ln_m = np.log(len(data[~np.isnan(data)]))
 
-    if initial_ncomp is None:
+    if initial_n_comp is None:
         # We start with a zero component model, i.e. a flat line
         n_comp = 0
         likelihood = ln_like(
@@ -617,7 +670,7 @@ def delta_bic_looper(
 
     else:
         # Start with an initial guess of component numbers
-        n_comp = int(initial_ncomp)
+        n_comp = int(initial_n_comp)
         k = n_comp * prop_len
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -655,6 +708,9 @@ def delta_bic_looper(
         # Calculate BIC and AIC
         bic = k * ln_m - 2 * likelihood
         aic = 2 * k - 2 * likelihood
+
+    bic_old = bic
+    aic_old = aic
 
     while (
         delta_bic > glob_config["delta_bic_cutoff"]
@@ -709,6 +765,9 @@ def delta_bic_looper(
         aic = 2 * k - 2 * likelihood
         delta_aic = aic_old - aic
 
+    # Move back to the previous values
+    bic = bic_old
+    aic = aic_old
     sampler = sampler_old
     likelihood = likelihood_old
     n_comp -= 1
@@ -776,7 +835,6 @@ def delta_bic_looper(
             bic_old = bic
             aic_old = aic
             sampler_old = sampler
-            likelihood_old = likelihood
 
             # Remove the weakest component
             n_comp -= 1
@@ -844,12 +902,16 @@ def delta_bic_looper(
             ):
                 break
 
+        # Revert to previous sampler/n_comp
         sampler = sampler_old
-        likelihood = likelihood_old
         n_comp += 1
 
-    # Finally, calculate the covariance matrix and the parameter medians.
+    # Calculate the covariance matrix and the parameter medians/errors.
     # This is only defined if we end up with a 0-component fit
+
+    tpeak_percentiles = None
+    tpeak_diff = None
+
     if sampler is not None:
         samples = get_samples(
             sampler,
@@ -859,7 +921,61 @@ def delta_bic_looper(
         cov_matrix = np.cov(samples.T)
         cov_med = np.median(samples, axis=0)
 
-    return n_comp, likelihood, sampler, cov_matrix, cov_med
+        param_percentiles = np.percentile(samples, [16, 50, 84], axis=0)
+        best_fit_pars = param_percentiles[1, :]
+        best_fit_errs = np.diff(param_percentiles, axis=0)
+
+        # Calculate Tpeak with errors from the samples
+        tpeak = sample_tpeak_per_component(
+            samples=samples,
+            n_comp=n_comp,
+        )
+
+        tpeak_percentiles = np.percentile(tpeak, [16, 50, 84], axis=0)
+        tpeak_diff = np.diff(tpeak_percentiles, axis=0)
+
+    # Calculate goodness-of-fit parameters
+    goodness_of_fit_metrics = calculate_goodness_of_fit(
+        data=data,
+        error=error,
+        best_fit_pars=best_fit_pars,
+        n_comp=n_comp,
+    )
+
+    # Put everything into one big ol' dictionary
+    fit_dict = {
+        "props": {},
+        "props_err_down": {},
+        "props_err_up": {},
+        "n_comp": n_comp,
+        "sampler": sampler,
+        "cov_matrix": cov_matrix,
+        "cov_med": cov_med,
+    }
+    fit_dict.update(goodness_of_fit_metrics)
+
+    # Put in Tpeak/Tpeak errors
+    if n_comp > 0:
+        fit_dict["props"]["tpeak"] = tpeak_percentiles[1, :]
+        fit_dict["props_err_down"]["tpeak"] = tpeak_diff[0, :]
+        fit_dict["props_err_up"]["tpeak"] = tpeak_diff[1, :]
+
+    # Put in property and property errors
+    arr = np.zeros(n_comp)
+    for i in range(n_comp):
+        for prop_idx, prop in enumerate(glob_config["props"]):
+            param_idx = i * len(glob_config["props"]) + prop_idx
+
+            if prop not in fit_dict["props"]:
+                fit_dict["props"][prop] = copy.deepcopy(arr)
+                fit_dict["props_err_down"][prop] = copy.deepcopy(arr)
+                fit_dict["props_err_up"][prop] = copy.deepcopy(arr)
+
+            fit_dict["props"][prop][i] = best_fit_pars[param_idx]
+            fit_dict["props_err_down"][prop][i] = best_fit_errs[0, param_idx]
+            fit_dict["props_err_up"][prop][i] = best_fit_errs[1, param_idx]
+
+    return fit_dict
 
 
 def run_mcmc(
@@ -1140,9 +1256,9 @@ def run_mcmc(
                 "likelihood": likelihood,
             }
 
-            save_fit_dict(fit_dict, fit_dict_filename)
+            save_pkl(fit_dict, fit_dict_filename)
     else:
-        fit_dict = load_fit_dict(fit_dict_filename)
+        fit_dict = load_pkl(fit_dict_filename)
         sampler = fit_dict["sampler"]
 
     return sampler
@@ -1398,24 +1514,30 @@ def initialise_positions(
 def parallel_fit_samples(
     ij,
     fit_dict_filename=None,
-    n_comp=None,
+    consolidate_fit_dict=True,
 ):
-    """Pull fit percentiles from a single pixel"""
+    """Pull fit percentiles from a single pixel
 
-    if not fit_dict_filename or n_comp is None:
-        logger.warning("Fit dict filename and n_comp must be defined!")
+    Will pull from the fit dict if we can, else will
+    read in each individual file
+    """
+
+    if fit_dict_filename is None:
+        logger.warning("fit_dict_filename must be defined!")
         sys.exit()
 
     i = ij[0]
     j = ij[1]
 
-    n_comp_pix = int(n_comp[i, j])
+    if consolidate_fit_dict:
+        fit_dict = glob_mcfine_output["fit"].get(i, {}).get(j, {})
+    else:
+        cube_sampler_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+        fit_dict = load_pkl(cube_sampler_filename)
+    n_comp = fit_dict["n_comp"]
 
-    cube_sampler_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-
-    if n_comp_pix == 0:
+    if n_comp == 0:
         return np.zeros([3, len(glob_vel)])
-    fit_dict = load_fit_dict(cube_sampler_filename)
 
     flat_samples = get_samples_from_fit_dict(
         fit_dict, burn_in_frac=glob_config["burn_in"], thin_frac=glob_config["thin"]
@@ -1429,14 +1551,18 @@ def parallel_fit_samples(
         v_lines=glob_config["v_lines"],
         fit_type=glob_config["fit_type"],
         n_draws=100,
-        n_comp=n_comp_pix,
+        n_comp=n_comp,
     )
 
     fit_percentiles = np.nanpercentile(
         np.nansum(fit_lines, axis=-1),
-        [50, 16, 84],
+        [16, 50, 84],
         axis=1,
     )
+    fit_diffs = np.diff(fit_percentiles, axis=0)
+
+    # Put these into down error/nominal/up error array
+    fit_final = np.array([fit_diffs[0, :], fit_percentiles[1, :], fit_diffs[1, :]])
 
     return fit_percentiles
 
@@ -1508,127 +1634,6 @@ def get_fits_from_samples(
     return fit_lines
 
 
-def parallel_map_making(
-    ij,
-    n_comp=None,
-    fit_dict_filename="fit_dict",
-    n_samples=500,
-):
-    """Pull parameters for map out of a single pixel"""
-
-    if n_comp is None:
-        logger.warning("n_comp should be defined!")
-        sys.exit()
-
-    i, j = ij[0], ij[1]
-    n_comps_pix = int(n_comp[i, j])
-
-    par_dict = {}
-
-    obs = glob_data[:, i, j]
-    obs_err = glob_error[:, i, j]
-
-    if n_comps_pix > 0:
-
-        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-        fit_dict = load_fit_dict(cube_fit_dict_filename)
-
-        flat_samples = get_samples_from_fit_dict(
-            fit_dict,
-            burn_in_frac=glob_config["burn_in"],
-            thin_frac=glob_config["thin"],
-        )
-
-        # Pull out median and errors for each parameter and each component
-        param_percentiles = np.percentile(flat_samples, [16, 50, 84], axis=0)
-        param_diffs = np.diff(param_percentiles, axis=0)
-
-        # Pull out model for reduced chi-square
-        total_model = multiple_components(
-            theta=param_percentiles[1, :],
-            vel=glob_vel,
-            strength_lines=glob_config["strength_lines"],
-            v_lines=glob_config["v_lines"],
-            props=glob_config["props"],
-            n_comp=n_comps_pix,
-            fit_type=glob_config["fit_type"],
-        )
-
-        for n_comp_pix in range(n_comps_pix):
-
-            # Pull out peak intensities and errors for each component
-
-            tpeak = np.zeros(n_samples)
-            idx_offset = len(glob_config["props"])
-            for sample in range(n_samples):
-                choice_idx = np.random.randint(0, flat_samples.shape[0])
-                theta = flat_samples[
-                    choice_idx,
-                    idx_offset * n_comp_pix : idx_offset * n_comp_pix + idx_offset,
-                ]
-
-                if glob_config["fit_type"] == "lte":
-                    model = hyperfine_structure_lte(
-                        *theta,
-                        strength_lines=glob_config["strength_lines"],
-                        v_lines=glob_config["v_lines"],
-                        vel=glob_vel,
-                    )
-
-                elif glob_config["fit_type"] == "pure_gauss":
-                    model = hyperfine_structure_pure_gauss(
-                        *theta,
-                        strength_lines=glob_config["strength_lines"],
-                        v_lines=glob_config["v_lines"],
-                        vel=glob_vel,
-                    )
-
-                elif glob_config["fit_type"] == "radex":
-
-                    model = hyperfine_structure_radex(
-                        *theta,
-                        v_lines=glob_config["v_lines"],
-                        vel=glob_vel,
-                    )
-
-                else:
-                    logger.warning(
-                        f"Fit type {glob_config['fit_type']} not understood!"
-                    )
-                    sys.exit()
-
-                tpeak[sample] = np.nanmax(model)
-
-            tpeak_percentiles = np.percentile(tpeak, [16, 50, 84], axis=0)
-            tpeak_diff = np.diff(tpeak_percentiles)
-
-            par_dict[f"tpeak_{n_comp_pix}"] = tpeak_percentiles[1]
-            par_dict[f"tpeak_{n_comp_pix}_err_down"] = tpeak_diff[0]
-            par_dict[f"tpeak_{n_comp_pix}_err_up"] = tpeak_diff[1]
-
-            # Pull out fitted properties and errors for each component
-
-            for prop_idx, prop in enumerate(glob_config["props"]):
-                param_idx = n_comp_pix * len(glob_config["props"]) + prop_idx
-                par_dict[f"{prop}_{n_comp_pix}"] = param_percentiles[1, param_idx]
-                par_dict[f"{prop}_{n_comp_pix}_err_down"] = param_diffs[0, param_idx]
-                par_dict[f"{prop}_{n_comp_pix}_err_up"] = param_diffs[1, param_idx]
-
-            # Pull out covariance
-            if glob_config["keep_covariance"]:
-                par_dict["cov"] = copy.deepcopy(fit_dict["cov"])
-
-    else:
-        total_model = np.zeros_like(obs)
-
-    # Add in reduced chisq
-    chisq = chi_square(obs, total_model, obs_err)
-    deg_freedom = len(obs[~np.isnan(obs)]) - (n_comps_pix * len(glob_config["props"]))
-    par_dict["chisq_red"] = chisq / deg_freedom
-
-    return par_dict
-
-
 class HyperfineFitter:
 
     def __init__(
@@ -1681,11 +1686,17 @@ class HyperfineFitter:
         self.logger = logger
 
         # Load in the data spectral cube
+        wcs = None
+        wcs_2d = None
         if isinstance(data, str):
             data = SpectralCube.read(data)
 
+            # Get WCS out
+            wcs = data.wcs
+            wcs_2d = data[0, :, :].wcs
+
             # Get the velocity axis out
-            vel = data.spectral_axis.to(u.km/u.s).value
+            vel = data.spectral_axis.to(u.km / u.s).value
 
             # Convert to K, pull out values
             data = data.unmasked_data[:].to(u.K).value
@@ -1700,6 +1711,8 @@ class HyperfineFitter:
         self.data = data
         self.error = error
         self.vel = vel
+        self.wcs = wcs
+        self.wcs_2d = wcs_2d
 
         # Define global variables for potentially huge arrays
         global glob_data, glob_error, glob_vel
@@ -1710,7 +1723,7 @@ class HyperfineFitter:
         self.downsampled_data = np.array([])
         self.downsampled_error = np.array([])
         self.downsampled_mask = np.array([])
-        self.initial_ncomp = np.array([])
+        self.initial_n_comp = np.array([])
 
         with open(CONFIG_DEFAULT_PATH, "rb") as f:
             config_defaults = tomllib.load(f)
@@ -1783,6 +1796,16 @@ class HyperfineFitter:
             sys.exit()
 
         self.fit_method = fit_method
+
+        # Are we consolidate the fit dictionary into one file?
+        consolidate_fit_dict = get_dict_val(
+            self.config,
+            self.config_defaults,
+            table="fitting_params",
+            key="consolidate_fit_dict",
+            logger=self.logger,
+        )
+        self.consolidate_fit_dict = consolidate_fit_dict
 
         # Are we keeping the sampler/covariance matrix?
         keep_sampler = get_dict_val(
@@ -2166,8 +2189,42 @@ class HyperfineFitter:
             glob_config[k] = self.__dict__[k]
 
         self.parameter_maps = None
-        self.covariance_dict = None
-        self.max_n_comp = None
+
+    def initialise_mcfine_output(self, data=None, data_type="original"):
+        """Initialise the mcfine output, which stores useful information about the fit run
+
+        Args:
+            data: Array of data
+            data_type: Type of data. Should be "original" or "downsampled". Will not take WCS
+                for downsampled data
+        """
+
+        mcfine_output = {}
+
+        # Start by pulling in the configurations
+        mcfine_output["user_configuration_settings"] = copy.deepcopy(self.config)
+        mcfine_output["default_configuration_settings"] = copy.deepcopy(
+            self.config_defaults
+        )
+
+        mcfine_output["user_local_settings"] = copy.deepcopy(self.local)
+        mcfine_output["default_local_settings"] = copy.deepcopy(self.local_defaults)
+
+        # Then information about the data, which should only exist if we're fitting a cube
+        if data is not None:
+            mcfine_output["data"] = {}
+            mcfine_output["data"]["shape"] = data.shape
+
+            # Add in the WCS, so we can spit out fits files later
+            if self.wcs is not None and data_type != "downsampled":
+                mcfine_output["data"]["wcs"] = copy.deepcopy(self.wcs)
+                mcfine_output["data"]["wcs_2d"] = copy.deepcopy(self.wcs_2d)
+
+        # And finally, a space for the fits
+        if self.consolidate_fit_dict:
+            mcfine_output["fit"] = {}
+
+        return mcfine_output
 
     def generate_radex_grid(
         self,
@@ -2317,8 +2374,7 @@ class HyperfineFitter:
     def downsample_fitter(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
-        likelihood_filename=None,
+        mcfine_output_filename=None,
         downsample_factor=10,
     ):
         """Run multicomponent fitter on downsampled data
@@ -2329,10 +2385,8 @@ class HyperfineFitter:
         Args:
             fit_dict_filename: Filename to save the fitted emcee walkers
                 to. Defaults to None, which will not save anything
-            n_comp_filename: Filename to save out fitted number of components.
+            mcfine_output_filename: Filename to save the mcfine output to.
                 Defaults to None, which will not save anything
-            likelihood_filename: Filename to save out likelihood for the
-                best fit. Defaults to None, which will not save anything
             downsample_factor: Factor to downsample the data down on each spatial axis
         """
 
@@ -2342,9 +2396,15 @@ class HyperfineFitter:
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
 
-        # For data and error, take means
-        downsampled_data = downsample(self.data, chunk_size=downsample_factor)
-        downsampled_error = downsample(self.error, chunk_size=downsample_factor)
+        # For data and error, we want some representative values within the averaging
+        # area. Otherwise, we can hugely boost S/N and end up fitting all the blended
+        # components, which is not what we want!
+        downsampled_data = downsample(
+            self.data, chunk_size=downsample_factor, func=np.nanmedian
+        )
+        downsampled_error = downsample(
+            self.error, chunk_size=downsample_factor, func=np.nanmedian
+        )
 
         # Mask is a little different. Take sum and reduce to bool
         downsampled_mask = downsample(
@@ -2361,33 +2421,68 @@ class HyperfineFitter:
         glob_downsampled_data = downsampled_data
         glob_downsampled_error = downsampled_error
 
-        if n_comp_filename is None:
-            n_comp_filename = get_dict_val(
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="n_comp_filename",
-                logger=self.logger,
-            )
-        if likelihood_filename is None:
-            likelihood_filename = get_dict_val(
-                self.config,
-                self.config_defaults,
-                table="multicomponent_fitter",
-                key="likelihood_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
 
-        if not os.path.exists(f"{n_comp_filename}.npy") or overwrite:
-            self.multicomponent_fitter(
+        if not os.path.exists(f"{mcfine_output_filename}.pkl") or overwrite:
+            mcfine_output = self.multicomponent_fitter(
                 fit_dict_filename=fit_dict_filename,
-                n_comp_filename=n_comp_filename,
-                likelihood_filename=likelihood_filename,
+                mcfine_output_filename=mcfine_output_filename,
                 data_type="downsampled",
             )
 
-        # Get n_comp out and sample back to the original grid
-        n_comp = np.load(f"{n_comp_filename}.npy")
+            # Save the output
+            save_pkl(
+                mcfine_output,
+                f"{mcfine_output_filename}.pkl",
+            )
+
+        else:
+            mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
+
+        # Get n_comp out and sample back to the original grid. If we've
+        # got the info in the fit dict, this is trivial
+        if "fit" in mcfine_output:
+
+            n_comp = np.array(
+                [
+                    [
+                        mcfine_output["fit"].get(i, {}).get(j, {}).get("n_comp", 0)
+                        for i in range(downsampled_data.shape[1])
+                    ]
+                    for j in range(downsampled_data.shape[2])
+                ]
+            ).T
+
+        # Otherwise, loop over files and pull out info
+        else:
+
+            n_comp = np.zeros(downsampled_data.shape[1:])
+
+            if fit_dict_filename is None:
+                fit_dict_filename = get_dict_val(
+                    self.config,
+                    self.config_defaults,
+                    table="multicomponent_fitter",
+                    key="fit_dict_filename",
+                    logger=self.logger,
+                )
+
+            for i in range(downsampled_data.shape[1]):
+                for j in range(downsampled_data.shape[2]):
+
+                    fit_dict_f = f"{fit_dict_filename}_{i}_{j}.pkl"
+
+                    if os.path.exists(fit_dict_f):
+                        fit_dict = load_pkl(fit_dict_f)
+
+                        n_comp[i, j] = fit_dict["n_comp"]
 
         # Get indices for the downsampled and upsampled arrays
         i_us = np.arange(self.data.shape[1])
@@ -2402,7 +2497,6 @@ class HyperfineFitter:
 
         for i_idx, i in enumerate(i_split):
             for j_idx, j in enumerate(j_split):
-
                 # Get min/max indices to map back to the array
                 i_low = np.min(i)
                 i_high = np.max(i)
@@ -2413,18 +2507,17 @@ class HyperfineFitter:
                     i_idx, j_idx
                 ]
 
-        self.initial_ncomp = copy.deepcopy(n_comp_upsampled)
+        self.initial_n_comp = copy.deepcopy(n_comp_upsampled)
 
-        global glob_initial_ncomp
-        glob_initial_ncomp = self.initial_ncomp
+        global glob_initial_n_comp
+        glob_initial_n_comp = self.initial_n_comp
 
         return True
 
     def multicomponent_fitter(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
-        likelihood_filename=None,
+        mcfine_output_filename=None,
         data_type="original",
     ):
         """Run the multicomponent fitter
@@ -2437,10 +2530,8 @@ class HyperfineFitter:
         Args:
             fit_dict_filename: Filename to save the fitted emcee walkers
                 to. Defaults to None, which will not save anything
-            n_comp_filename: Filename to save out fitted number of components.
+            mcfine_output_filename: Filename to save the mcfine output to.
                 Defaults to None, which will not save anything
-            likelihood_filename: Filename to save out likelihood for the
-                best fit. Defaults to None, which will not save anything
             data_type: Data type to fit. Can be either "original" or "downsampled"
         """
 
@@ -2452,165 +2543,164 @@ class HyperfineFitter:
 
         self.logger.info("Starting multi-component fitting")
 
-        if fit_dict_filename is None:
-            fit_dict_filename = get_dict_val(
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="fit_dict_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
 
-        # Create output directory if it doesn't exist
-        fit_dict_base_dir = os.path.dirname(fit_dict_filename)
-        if not os.path.exists(fit_dict_base_dir):
-            os.makedirs(fit_dict_base_dir)
+        if not os.path.exists(f"{mcfine_output_filename}.pkl") or overwrite:
 
-        chunksize = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="multicomponent_fitter",
-            key="chunksize",
-            logger=self.logger,
-        )
-
-        progress = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="multicomponent_fitter",
-            key="progress",
-            logger=self.logger,
-        )
-
-        save = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="multicomponent_fitter",
-            key="save",
-            logger=self.logger,
-        )
-
-        if data_type == "original":
-            data = copy.deepcopy(self.data)
-            error = copy.deepcopy(self.error)
-            mask = copy.deepcopy(self.mask)
-        elif data_type == "downsampled":
-            data = copy.deepcopy(self.downsampled_data)
-            error = copy.deepcopy(self.downsampled_error)
-            mask = copy.deepcopy(self.downsampled_mask)
-
-            # If somehow we've broken the logic here, then freak out
-            if data.size == 0:
-                raise ValueError(
-                    "Must run data downsampling if you want to fit downsampled data"
+            if fit_dict_filename is None:
+                fit_dict_filename = get_dict_val(
+                    self.config,
+                    self.config_defaults,
+                    table="multicomponent_fitter",
+                    key="fit_dict_filename",
+                    logger=self.logger,
                 )
+
+            # Create output directory if it doesn't exist
+            fit_dict_base_dir = os.path.dirname(fit_dict_filename)
+            if not os.path.exists(fit_dict_base_dir):
+                os.makedirs(fit_dict_base_dir)
+
+            chunksize = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="chunksize",
+                logger=self.logger,
+            )
+
+            progress = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="progress",
+                logger=self.logger,
+            )
+
+            save = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="save",
+                logger=self.logger,
+            )
+
+            if data_type == "original":
+                data = copy.deepcopy(self.data)
+                error = copy.deepcopy(self.error)
+                mask = copy.deepcopy(self.mask)
+            elif data_type == "downsampled":
+                data = copy.deepcopy(self.downsampled_data)
+                error = copy.deepcopy(self.downsampled_error)
+                mask = copy.deepcopy(self.downsampled_mask)
+
+                # If somehow we've broken the logic here, then freak out
+                if data.size == 0:
+                    raise ValueError(
+                        "Must run data downsampling if you want to fit downsampled data"
+                    )
+
+            else:
+                raise ValueError("Data type to fit should be original or downsampled")
+
+            # Start fitting!
+            mcfine_output = None
+
+            if self.data_type == "spectrum":
+
+                mcfine_output = self.initialise_mcfine_output()
+
+                if not os.path.exists(f"{mcfine_output_filename}.pkl") or overwrite:
+
+                    fit_dict = delta_bic_looper(
+                        data,
+                        error,
+                        progress=progress,
+                    )
+
+                    if not self.keep_sampler:
+                        fit_dict.pop("sampler")
+                    if not self.keep_covariance:
+                        fit_dict.pop("cov_matrix")
+                        fit_dict.pop("cov_med")
+
+                    if self.consolidate_fit_dict:
+                        mcfine_output["fit"].update(fit_dict)
+
+                    if save:
+                        save_pkl(fit_dict, f"{fit_dict_filename}.pkl")
+                        save_pkl(mcfine_output, f"{mcfine_output_filename}.pkl")
+
+            elif self.data_type == "cube":
+
+                mcfine_output = self.initialise_mcfine_output(
+                    data=data,
+                    data_type=data_type,
+                )
+
+                ij_list = [
+                    (i, j)
+                    for i in range(data.shape[1])
+                    for j in range(data.shape[2])
+                    if mask[i, j] != 0
+                ]
+
+                self.logger.info(f"Fitting using {self.n_cores} cores")
+
+                # Do the fitting. This requires saving out files, since
+                # we just return a filename
+                with mp.Pool(self.n_cores) as pool:
+                    result = list(
+                        tqdm(
+                            pool.imap(
+                                partial(
+                                    parallel_fitting,
+                                    fit_dict_filename=fit_dict_filename,
+                                    data_type=data_type,
+                                    overwrite=overwrite,
+                                ),
+                                ij_list,
+                                chunksize=chunksize,
+                            ),
+                            total=len(ij_list),
+                            dynamic_ncols=True,
+                        )
+                    )
+
+                for idx, ij in enumerate(ij_list):
+                    if ij[0] not in mcfine_output["fit"]:
+                        mcfine_output["fit"][ij[0]] = {}
+                    if ij[1] not in mcfine_output["fit"][ij[0]]:
+                        mcfine_output["fit"][ij[0]][ij[1]] = {}
+
+                    fit_dict = load_pkl(result[idx])
+
+                    # Consolidate fit dictionaries
+                    if self.consolidate_fit_dict:
+                        mcfine_output["fit"][ij[0]][ij[1]].update(fit_dict)
+
+                if save:
+                    save_pkl(mcfine_output, f"{mcfine_output_filename}.pkl")
 
         else:
-            raise ValueError("Data type to fit should be original or downsampled")
+            mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
 
-        if self.data_type == "spectrum":
-
-            if not os.path.exists(f"{fit_dict_filename}.pkl") or overwrite:
-
-                n_comp, likelihood, sampler, cov_matrix, cov_med = delta_bic_looper(
-                    data,
-                    error,
-                    progress=progress,
-                )
-                if save:
-
-                    fit_dict = {
-                        "n_comp": n_comp,
-                        "likelihood": likelihood,
-                        "sampler": None,
-                        "cov": {},
-                    }
-                    if self.keep_sampler:
-                        fit_dict["sampler"] = sampler
-                    else:
-                        fit_dict.pop("sampler")
-
-                    if self.keep_covariance:
-                        fit_dict["cov"] = {
-                            "matrix": cov_matrix,
-                            "med": cov_med,
-                        }
-                    else:
-                        fit_dict.pop("cov")
-
-                    save_fit_dict(fit_dict, f"{fit_dict_filename}.pkl")
-
-        elif self.data_type == "cube":
-
-            if n_comp_filename is None:
-                n_comp_filename = get_dict_val(
-                    self.config,
-                    self.config_defaults,
-                    table="multicomponent_fitter",
-                    key="n_comp_filename",
-                    logger=self.logger,
-                )
-            if likelihood_filename is None:
-                likelihood_filename = get_dict_val(
-                    self.config,
-                    self.config_defaults,
-                    table="multicomponent_fitter",
-                    key="likelihood_filename",
-                    logger=self.logger,
-                )
-
-            if not os.path.exists(f"{n_comp_filename}.npy") or overwrite:
-                n_comp = np.zeros([data.shape[1], data.shape[2]])
-            else:
-                n_comp = np.load(f"{n_comp_filename}.npy")
-            if not os.path.exists(f"{likelihood_filename}.npy") or overwrite:
-                likelihood = np.zeros_like(n_comp)
-            else:
-                likelihood = np.load(f"{likelihood_filename}.npy")
-
-            ij_list = [
-                (i, j)
-                for i in range(data.shape[1])
-                for j in range(data.shape[2])
-                if mask[i, j] != 0
-            ]
-
-            self.logger.info(f"Fitting using {self.n_cores} cores")
-
-            with mp.Pool(self.n_cores) as pool:
-                map_result = list(
-                    tqdm(
-                        pool.imap(
-                            partial(
-                                parallel_fitting,
-                                fit_dict_filename=fit_dict_filename,
-                                data_type=data_type,
-                                save=save,
-                                overwrite=overwrite,
-                            ),
-                            ij_list,
-                            chunksize=chunksize,
-                        ),
-                        total=len(ij_list),
-                        dynamic_ncols=True,
-                    )
-                )
-
-            for idx, ij in enumerate(ij_list):
-                n_comp[ij[0], ij[1]] = map_result[idx][0]
-                likelihood[ij[0], ij[1]] = map_result[idx][1]
-
-            if save:
-                np.save(f"{n_comp_filename}.npy", n_comp)
-                np.save(f"{likelihood_filename}.npy", likelihood)
+        return mcfine_output
 
     def encourage_spatial_coherence(
         self,
         input_dir="fit",
         output_dir="fit_coherence",
         fit_dict_filename=None,
-        n_comp_filename=None,
-        likelihood_filename=None,
+        mcfine_input_filename=None,
+        mcfine_output_filename=None,
         reverse_direction=False,
     ):
         """Loop over fits to encourage spatial coherence
@@ -2626,10 +2716,10 @@ class HyperfineFitter:
                 Defaults to 'fit_coherence'
             fit_dict_filename: Filename structure for the fit dictionary.
                 Default to None, which will choose some generic name
-            n_comp_filename: Filename for the n_comp map. Defaults to
-                None, which will choose some generic name
-            likelihood_filename: Filename for the likelihood map. Defaults to
-                None, which will choose some generic name
+            mcfine_input_filename: Name for the consolidated mcfine output to start with.
+                Defaults to None, which will pull the default name "mcfine"
+            mcfine_output_filename: Name for the consolidated mcfine output to save at the
+                end. Defaults to None, which will pull the default name "mcfine_coherence"
             reverse_direction: Whether to reverse how we step through x/y
                 in the coherence encouragement. Defaults to False, but likely
                 you should run one case forward, then another backward
@@ -2651,22 +2741,33 @@ class HyperfineFitter:
                 logger=self.logger,
             )
 
-        if n_comp_filename is None:
-            n_comp_filename = get_dict_val(
+        if mcfine_input_filename is None:
+            mcfine_input_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="n_comp_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
-        if likelihood_filename is None:
-            likelihood_filename = get_dict_val(
+
+        if not os.path.exists(f"{mcfine_input_filename}.pkl"):
+            raise FileNotFoundError(
+                f"{mcfine_input_filename}.pkl not found! Make sure this exists"
+            )
+
+        # If we don't have an output filename, take the default plus a "coherence" appended
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="likelihood_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
+            mcfine_output_filename += "_coherence"
+
+        if os.path.exists(f"{mcfine_output_filename}.pkl") and not overwrite:
+            return True
 
         if reverse_direction:
             step = -1
@@ -2696,8 +2797,9 @@ class HyperfineFitter:
             for file_in_dir in files_in_dir:
                 os.remove(file_in_dir)
 
-        n_comp = np.load(os.path.join(input_dir, f"{n_comp_filename}.npy"))
-        likelihood = np.load(os.path.join(input_dir, f"{likelihood_filename}.npy"))
+            if os.path.exists(f"{mcfine_output_filename}.pkl"):
+                os.remove(f"{mcfine_output_filename}.pkl")
+
         total_found = 0
 
         ij_list = [
@@ -2707,42 +2809,37 @@ class HyperfineFitter:
             if self.mask[i, j] != 0
         ]
 
+        # Read in the previous output dictionary, to define the new one
+        mcfine_output = load_pkl(f"{mcfine_input_filename}.pkl")
+
         # Set up a dictionary to record best-fit parameters, to
         # reduce I/O
         fit_params = {}
 
-        for ij in tqdm(ij_list,
-                       dynamic_ncols=True,
-                       ):
+        for ij in tqdm(
+            ij_list,
+            dynamic_ncols=True,
+        ):
 
             i, j = ij[0], ij[1]
-
-            # Pull out the neighbouring pixels
-            i_min = max(0, i - 1)
-            i_max = min(self.data.shape[1], i + 2)
-            j_min = max(0, j - 1)
-            j_max = min(self.data.shape[2], j + 2)
-
-            n_comp_cutout = n_comp[i_min:i_max, j_min:j_max]
 
             input_file = os.path.join(input_dir, f"{fit_dict_filename}_{i}_{j}.pkl")
             output_file = os.path.join(output_dir, f"{fit_dict_filename}_{i}_{j}.pkl")
 
             if not os.path.exists(output_file) or overwrite:
 
-                n_comp_original = int(n_comp[i, j])
-                ln_m = np.log(len(self.data[:, i, j][~np.isnan(self.data[:, i, j])]))
-
                 # Pull original likelihood for the pixel
-                fit_dict = load_fit_dict(input_file)
-                like_original = fit_dict["likelihood"]
+                fit_dict = load_pkl(input_file)
+                bic_original = fit_dict["bic"]
+                aic_original = fit_dict["aic"]
 
-                bic_original = (
-                    ln_m * n_comp_original * len(self.props) - 2 * like_original
-                )
-                aic_original = 2 * n_comp_original * len(self.props) - 2 * like_original
+                # Pull out the neighbouring pixels
+                i_min = max(0, i - 1)
+                i_max = min(self.data.shape[1], i + 2)
+                j_min = max(0, j - 1)
+                j_max = min(self.data.shape[2], j + 2)
 
-                delta_bic = np.zeros_like(n_comp_cutout)
+                delta_bic = np.zeros([i_max - i_min, j_max - j_min])
                 delta_aic = np.zeros_like(delta_bic)
                 likelihood_cutout = np.zeros_like(delta_bic)
 
@@ -2752,81 +2849,55 @@ class HyperfineFitter:
                         if self.mask[i_full, j_full] == 0:
                             continue
 
-                        # Pull out the parameters from the neighbouring fits, and see if that works better for the
-                        # original pixel
-                        n_comp_new = int(n_comp[i_full, j_full])
-                        if n_comp_new > 0:
+                        # If we haven't already looked at this one, pull in
+                        # the fit dictionary and get parameters out
+                        fit_params_key = f"{i_full}_{j_full}"
 
-                            # If we haven't already looked at this one, pull in
-                            # the fit dictionary
+                        if fit_params_key not in fit_params:
+                            # Check if we already have moved the fit dictionary
+                            cutout_fit_dict_filename = os.path.join(
+                                output_dir,
+                                f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
+                            )
 
-                            fit_params_key = f"{i_full}_{j_full}"
-
-                            if fit_params_key not in fit_params:
-
-                                # Check if we already have moved the sampler file
+                            if not os.path.exists(cutout_fit_dict_filename):
                                 cutout_fit_dict_filename = os.path.join(
-                                    output_dir,
+                                    input_dir,
                                     f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
                                 )
+                            cutout_fit_dict = load_pkl(cutout_fit_dict_filename)
 
-                                if not os.path.exists(cutout_fit_dict_filename):
-                                    cutout_fit_dict_filename = os.path.join(
-                                        input_dir,
-                                        f"{fit_dict_filename}_{i_full}_{j_full}.pkl",
-                                    )
-                                cutout_fit_dict = load_fit_dict(cutout_fit_dict_filename)
+                            fit_params[fit_params_key] = {}
+                            fit_params[fit_params_key].update(cutout_fit_dict)
 
-                                # If we have the full emcee sampler, prefer that here
-                                if "sampler" in cutout_fit_dict:
-                                    cutout_sampler = cutout_fit_dict["sampler"]
-                                    flat_samples = get_samples(
-                                        cutout_sampler,
-                                        burn_in_frac=self.burn_in,
-                                        thin_frac=self.thin,
-                                    )
-                                    pars_new = np.nanmedian(
-                                        flat_samples,
-                                        axis=0,
-                                    )
+                            # Pull out the parameters
+                            theta = [
+                                float(cutout_fit_dict["props"][p][n])
+                                for n in range(cutout_fit_dict["n_comp"])
+                                for p in self.props
+                            ]
+                            fit_params[fit_params_key]["theta"] = theta
 
-                                # Else we have these calculated as part of the covariance matrix
-                                else:
-                                    pars_new = copy.deepcopy(cutout_fit_dict["cov"]["med"])
+                        n_comp_new = fit_params[fit_params_key]["n_comp"]
+                        theta = fit_params[fit_params_key]["theta"]
 
-                                fit_params[fit_params_key] = copy.deepcopy(pars_new)
+                        # Get the various goodness of fit metrics
+                        gof_metrics = calculate_goodness_of_fit(
+                            data=self.data[:, i, j],
+                            error=self.error[:, i, j],
+                            best_fit_pars=theta,
+                            n_comp=n_comp_new,
+                        )
 
-                            else:
-                                pars_new = fit_params.get(fit_params_key)
-
-                            like_new = ln_like(
-                                theta=pars_new,
-                                intensity=self.data[:, i, j],
-                                intensity_err=self.error[:, i, j],
-                                vel=self.vel,
-                                strength_lines=self.strength_lines,
-                                v_lines=self.v_lines,
-                                props=self.props,
-                                n_comp=n_comp_new,
-                                fit_type=self.fit_type,
-                            )
-                        else:
-                            like_new = ln_like(
-                                theta=0,
-                                intensity=self.data[:, i, j],
-                                intensity_err=self.error[:, i, j],
-                                vel=self.vel,
-                                strength_lines=self.strength_lines,
-                                v_lines=self.v_lines,
-                                props=self.props,
-                                n_comp=n_comp_new,
-                                fit_type=self.fit_type,
-                            )
-                        bic_new = ln_m * n_comp_new * len(self.props) - 2 * like_new
-                        aic_new = 2 * n_comp_new * len(self.props) - 2 * like_new
-                        delta_bic[i_cutout, j_cutout] = bic_original - bic_new
-                        delta_aic[i_cutout, j_cutout] = aic_original - aic_new
-                        likelihood_cutout[i_cutout, j_cutout] = like_new
+                        delta_bic[i_cutout, j_cutout] = (
+                            bic_original - gof_metrics["bic"]
+                        )
+                        delta_aic[i_cutout, j_cutout] = (
+                            aic_original - gof_metrics["aic"]
+                        )
+                        likelihood_cutout[i_cutout, j_cutout] = gof_metrics[
+                            "likelihood"
+                        ]
 
                 # Set ones where we don't have a meaningful value to something small
                 delta_bic[delta_bic == 0] = -1000
@@ -2842,8 +2913,6 @@ class HyperfineFitter:
                     and delta_aic[idx] > self.delta_aic_cutoff
                 ):
                     total_found += 1
-                    n_comp[i, j] = n_comp_cutout[idx]
-                    likelihood[i, j] = likelihood_cutout[idx]
 
                     # If we're replacing with a file we've already replaced, pull from the output directory. Else
                     # pull from the input directory.
@@ -2860,30 +2929,36 @@ class HyperfineFitter:
 
                 # If the fits have been updated, then update the likelihood and save out
                 if fit_updated:
-                    updated_fit_dict = load_fit_dict(input_file)
-                    updated_fit_dict["likelihood"] = likelihood[i, j]
-                    save_fit_dict(updated_fit_dict, output_file)
+                    updated_fit_dict = load_pkl(input_file)
 
-                    # Update the fit parameters dictionary
-                    # If we have the full emcee sampler, prefer that here
-                    if "sampler" in updated_fit_dict:
-                        cutout_sampler = updated_fit_dict["sampler"]
-                        flat_samples = get_samples(
-                            cutout_sampler,
-                            burn_in_frac=self.burn_in,
-                            thin_frac=self.thin,
-                        )
-                        pars_new = np.nanmedian(
-                            flat_samples,
-                            axis=0,
-                        )
-
-                    # Else we have these calculated as part of the covariance matrix
-                    else:
-                        pars_new = copy.deepcopy(updated_fit_dict["cov"]["med"])
-
+                    # Update the fit parameter dictionary
                     fit_param_key = f"{i}_{j}"
-                    fit_params[fit_param_key] = copy.deepcopy(pars_new)
+                    fit_params[fit_param_key].update(updated_fit_dict)
+
+                    # Pull out parameters
+                    theta = [
+                        float(updated_fit_dict["props"][p][n])
+                        for n in range(updated_fit_dict["n_comp"])
+                        for p in self.props
+                    ]
+                    fit_params[fit_param_key]["theta"] = copy.deepcopy(theta)
+
+                    # Update goodness of fit
+                    n_comp = updated_fit_dict["n_comp"]
+                    gof_metrics = calculate_goodness_of_fit(
+                        data=self.data[:, i, j],
+                        error=self.error[:, i, j],
+                        best_fit_pars=theta,
+                        n_comp=n_comp,
+                    )
+
+                    updated_fit_dict.update(gof_metrics)
+
+                    # Save out the updated fit dictionary
+                    save_pkl(updated_fit_dict, output_file)
+
+                    if self.consolidate_fit_dict:
+                        mcfine_output["fit"][i][j].update(updated_fit_dict)
 
                 # Move the right file to the new directory. Use hardlinks to minimize space if possible
                 else:
@@ -2892,33 +2967,50 @@ class HyperfineFitter:
                     else:
                         os.system(f"cp {input_file} {output_file}")
 
+            # Otherwise, load in and potentially update the dictionary
+            else:
+
+                # Do a quick comparison to see if the file has changed
+                if not filecmp.cmp(input_file, output_file):
+                    total_found += 1
+
+                if self.consolidate_fit_dict:
+                    updated_fit_dict = load_pkl(output_file)
+                    mcfine_output["fit"][i][j].update(updated_fit_dict)
+
         self.logger.info(f"Number replaced: {total_found}")
 
-        n_comp_output_filename = os.path.join(output_dir, f"{n_comp_filename}.npy")
-        likelihood_output_filename = os.path.join(
-            output_dir, f"{likelihood_filename}.npy"
-        )
+        if not os.path.exists(f"{mcfine_output_filename}.pkl") or overwrite:
+            save_pkl(mcfine_output, f"{mcfine_output_filename}.pkl")
 
-        if not os.path.exists(n_comp_output_filename) or overwrite:
-            np.save(n_comp_output_filename, n_comp)
-            np.save(likelihood_output_filename, likelihood)
+        return True
 
     def create_fit_cube(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
+        mcfine_output_filename=None,
         cube_filename=None,
     ):
         """Create upper/lower errors for spectral fit plots
 
+        Will preferentially get this from the mcfine_output, which is quicker and
+        reduces I/O. Otherwise, will pull in each individual fit
+
+        If WCS is present, this will be saved out as a multi-extension fits.
+        Otherwise, will save as a 4-D numpy array.
+
         Args:
             fit_dict_filename (str): Name for the filename of fitted parameter dictionary. Defaults
                 to None, which will pull from config.toml
-            n_comp_filename (str): Name for the filename of component number map. Defaults
-                to None, which will pull from config.toml
+            mcfine_output_filename (str): Name for the mcfine output.
+                Defaults to None, which will pull from config.toml
             cube_filename (str): Name for the filename of output cube. Defaults
                 to None, which will pull from config.toml
         """
+
+        if self.data_type != "cube":
+            self.logger.warning("Can only make fit cubes for cubes")
+            sys.exit()
 
         f_name = inspect.currentframe().f_code.co_name
         overwrite = check_overwrite(self.config, f_name)
@@ -2931,14 +3023,18 @@ class HyperfineFitter:
                 key="fit_dict_filename",
                 logger=self.logger,
             )
-        if n_comp_filename is None:
-            n_comp_filename = get_dict_val(
+
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="n_comp_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
+
+        if not os.path.exists(f"{mcfine_output_filename}.pkl"):
+            raise FileNotFoundError(f"{mcfine_output_filename}.pkl does not exist")
 
         if cube_filename is None:
             cube_filename = get_dict_val(
@@ -2957,7 +3053,17 @@ class HyperfineFitter:
             logger=self.logger,
         )
 
-        if not os.path.exists(f"{cube_filename}.npy") or overwrite:
+        # If we have WCS, we create fits files
+        if self.wcs is not None:
+            cube_filename = f"{cube_filename}.fits"
+        else:
+            cube_filename = f"{cube_filename}.npy"
+
+        if not os.path.exists(cube_filename) or overwrite:
+
+            # Load in the mcfine output as a global variable
+            global glob_mcfine_output
+            glob_mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
 
             ij_list = [
                 (i, j)
@@ -2966,11 +3072,29 @@ class HyperfineFitter:
                 if self.mask[i, j] != 0
             ]
 
-            n_comp = np.load(f"{n_comp_filename}.npy")
-
-            # Setup fit cube
-
-            fit_cube = np.zeros([3, *self.data.shape], dtype=np.float32)
+            # Setup fit cube. If we have WCS info, then this is 3
+            # fits cubes
+            if self.wcs is not None:
+                init_data = np.ones([*self.data.shape]) * np.nan
+                main_hdu = fits.PrimaryHDU(header=self.wcs.to_header())
+                cube_hdu = fits.ImageHDU(
+                    data=init_data,
+                    header=self.wcs.to_header(),
+                    name="NOMINAL",
+                )
+                err_down_hdu = fits.ImageHDU(
+                    data=init_data,
+                    header=self.wcs.to_header(),
+                    name="ERR_DOWN",
+                )
+                err_up_hdu = fits.ImageHDU(
+                    data=init_data,
+                    header=self.wcs.to_header(),
+                    name="ERR_UP",
+                )
+                fit_cube = fits.HDUList([main_hdu, cube_hdu, err_down_hdu, err_up_hdu])
+            else:
+                fit_cube = np.zeros([3, *self.data.shape], dtype=np.float32)
 
             with mp.Pool(self.n_cores) as pool:
                 map_result = list(
@@ -2979,7 +3103,7 @@ class HyperfineFitter:
                             partial(
                                 parallel_fit_samples,
                                 fit_dict_filename=fit_dict_filename,
-                                n_comp=n_comp,
+                                consolidate_fit_dict=self.consolidate_fit_dict,
                             ),
                             ij_list,
                             chunksize=chunksize,
@@ -2990,28 +3114,42 @@ class HyperfineFitter:
                 )
 
             for idx, ij in enumerate(ij_list):
-                fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
 
-            np.save(f"{cube_filename}.npy", fit_cube)
+                if self.wcs is not None:
+                    fit_cube["ERR_DOWN"].data[:, ij[0], ij[1]] = map_result[idx][0, :]
+                    fit_cube["NOMINAL"].data[:, ij[0], ij[1]] = map_result[idx][1, :]
+                    fit_cube["ERR_UP"].data[:, ij[0], ij[1]] = map_result[idx][2, :]
+                else:
+                    fit_cube[:, :, ij[0], ij[1]] = map_result[idx]
+
+            # Save out the cube
+            if self.wcs is not None:
+                fit_cube.writeto(cube_filename, overwrite=True)
+            else:
+                np.save(cube_filename, fit_cube)
+
+        return True
 
     def make_parameter_maps(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
+        mcfine_output_filename=None,
         maps_filename=None,
-        cov_filename=None,
     ):
-        """Make maps of fitted parameters
+        """Make maps of fitted parameters.
+
+        Will preferentially get this from the mcfine_output, which is quicker and
+        reduces I/O. Otherwise, will pull in each individual fit
+
+        If WCS is defined, these will be .fits files, otherwise just numpy arrays
 
         Args:
-            fit_dict_filename (str): Name for the filename of fitted parameter dictionary. Defaults
-                to None, which will pull from config.toml
-            n_comp_filename (str): Name for the filename of component number map. Defaults
-                to None, which will pull from config.toml
+            fit_dict_filename (str): Name for the filename of fitted parameter dictionary (without i/j suffix).
+                Defaults to None, which will pull from config.toml
+            mcfine_output_filename (str): Name for the mcfine output.
+                Defaults to None, which will pull from config.toml
             maps_filename (str): Name for the filename of output maps. Defaults
                 to None, which will pull from config.toml
-            cov_filename (str): Name for the filename of output covariance map.
-                Defaults to None, which will pull from config.toml
         """
 
         if self.data_type != "cube":
@@ -3030,14 +3168,17 @@ class HyperfineFitter:
                 logger=self.logger,
             )
 
-        if n_comp_filename is None:
-            n_comp_filename = get_dict_val(
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="n_comp_filename",
+                key="mcfine_output_filename",
                 logger=self.logger,
             )
+
+        if not os.path.exists(f"{mcfine_output_filename}.pkl"):
+            raise FileNotFoundError(f"{mcfine_output_filename}.pkl does not exist")
 
         if maps_filename is None:
             maps_filename = get_dict_val(
@@ -3048,73 +3189,26 @@ class HyperfineFitter:
                 logger=self.logger,
             )
 
-        if cov_filename is None:
-            cov_filename = get_dict_val(
-                self.config,
-                self.config_defaults,
-                table="make_parameter_maps",
-                key="cov_filename",
-                logger=self.logger,
-            )
-
-        n_samples = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="make_parameter_maps",
-            key="n_samples",
-            logger=self.logger,
-        )
-
-        chunksize = get_dict_val(
-            self.config,
-            self.config_defaults,
-            table="make_parameter_maps",
-            key="chunksize",
-            logger=self.logger,
-        )
-
-        n_comp = np.load(f"{n_comp_filename}.npy")
-        max_n_comp = int(np.nanmax(n_comp))
-
         parameter_maps = {}
-        cov_dict = {}
+
+        # Define what we'll pull out to maps that aren't
+        # coming from the properties themselves
+        non_prop_maps = [
+            "n_comp",
+            "likelihood",
+            "bic",
+            "aic",
+            "chisq",
+            "chisq_red",
+        ]
+
         if not os.path.exists(maps_filename) or overwrite:
 
-            # Set up arrays in a dictionary
+            # Load in the mcfine output
+            mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
 
-            parameter_maps["chisq_red"] = np.zeros(
-                [self.data.shape[1], self.data.shape[2]]
-            )
-            parameter_maps["chisq_red"][parameter_maps["chisq_red"] == 0] = np.nan
-
-            for i in range(max_n_comp):
-
-                keys = [
-                    f"tpeak_{i}",
-                    f"tpeak_{i}_err_up",
-                    f"tpeak_{i}_err_down",
-                ]
-                for key in keys:
-                    parameter_maps[key] = np.zeros(
-                        [self.data.shape[1], self.data.shape[2]]
-                    )
-                    parameter_maps[key][parameter_maps[key] == 0] = np.nan
-
-                for prop in self.props:
-
-                    keys = [
-                        f"{prop}_{i}",
-                        f"{prop}_{i}_err_up",
-                        f"{prop}_{i}_err_down",
-                    ]
-                    for key in keys:
-                        parameter_maps[key] = np.zeros(
-                            [self.data.shape[1], self.data.shape[2]]
-                        )
-                        parameter_maps[key][parameter_maps[key] == 0] = np.nan
-
-            # Loop over each pixel, pulling out the properties for each component, as well as the peak intensity and
-            # errors for everything. Parallelize this up for speed
+            # Pull 2D data shape out, since we need that later
+            data_shape_2d = mcfine_output["data"]["shape"][1:]
 
             ij_list = [
                 [i, j]
@@ -3123,59 +3217,104 @@ class HyperfineFitter:
                 if self.mask[i, j] != 0
             ]
 
-            with mp.Pool(self.n_cores) as pool:
-                par_dicts = list(
-                    tqdm(
-                        pool.imap(
-                            partial(
-                                parallel_map_making,
-                                n_comp=n_comp,
-                                fit_dict_filename=fit_dict_filename,
-                                n_samples=n_samples,
-                            ),
-                            ij_list,
-                            chunksize=chunksize,
-                        ),
-                        total=len(ij_list),
-                        dynamic_ncols=True,
-                    )
-                )
+            for ij in tqdm(
+                ij_list,
+                dynamic_ncols=True,
+            ):
 
-            # Pull the parameters into the arrays
+                i = ij[0]
+                j = ij[1]
 
-            for dict_idx, par_dict in enumerate(par_dicts):
+                # If we've consolidated the fit dictionary,
+                # we can pull directly from the output
+                if self.consolidate_fit_dict:
+                    fit_dict = mcfine_output["fit"].get(i, {}).get(j, {})
+                else:
+                    fit_dict = load_pkl(f"{fit_dict_filename}_{i}_{j}.pkl")
 
-                i, j = ij_list[dict_idx][0], ij_list[dict_idx][1]
-                for key in par_dict.keys():
-                    if key in parameter_maps:
-                        parameter_maps[key][i, j] = par_dict[key]
+                # Start looping over the parameters. If we don't have it already,
+                # set it up
+                for p in non_prop_maps:
+                    if p not in parameter_maps:
+
+                        f = self.setup_minimal_array(shape=data_shape_2d)
+                        parameter_maps[p] = copy.deepcopy(f)
+
+                    if self.wcs_2d is not None:
+                        parameter_maps[p].data[i, j] = fit_dict[p]
+                    else:
+                        parameter_maps[p][i, j] = fit_dict[p]
+
+                # Loop over properties with associated errors
+                prop_key_names = [
+                    "props",
+                    "props_err_down",
+                    "props_err_up",
+                ]
+
+                for k in prop_key_names:
+                    for p in fit_dict[k]:
+                        for n in range(fit_dict["n_comp"]):
+
+                            if f"{p}_{n}" not in parameter_maps:
+
+                                f = self.setup_minimal_array(shape=data_shape_2d)
+                                parameter_maps[f"{p}_{n}"] = copy.deepcopy(f)
+
+                            if self.wcs_2d is not None:
+                                parameter_maps[f"{p}_{n}"].data[i, j] = fit_dict[
+                                    "props"
+                                ][p][n]
+                            else:
+                                parameter_maps[f"{p}_{n}"][i, j] = fit_dict["props"][p][
+                                    n
+                                ]
 
                 # Also pull out covariance, if we keep that around.
-                # This works a little differently since arrays might be
-                # different sizes
+                # This works a little differently
                 if self.keep_covariance:
-                    cov_dict[f"{i}, {j}"] = copy.deepcopy(par_dict["cov"])
+                    if "cov_matrix" not in parameter_maps:
+                        parameter_maps["cov_matrix"] = {}
+                    if "cov_med" not in parameter_maps:
+                        parameter_maps["cov_med"] = {}
+                    parameter_maps["cov_matrix"][f"{i}, {j}"] = copy.deepcopy(
+                        fit_dict["cov_matrix"]
+                    )
+                    parameter_maps["cov_med"][f"{i}, {j}"] = copy.deepcopy(
+                        fit_dict["cov_med"]
+                    )
 
-            # Save out
+            # Save maps out
             if maps_filename is not None:
-                with open(maps_filename, "wb") as f:
-                    pickle.dump(parameter_maps, f)
-
-            if self.keep_covariance:
-                if cov_filename is not None:
-                    with open(cov_filename, "wb") as f:
-                        pickle.dump(cov_dict, f)
+                save_pkl(parameter_maps, maps_filename)
 
         else:
             with open(maps_filename, "rb") as f:
                 parameter_maps = pickle.load(f)
 
-            if self.keep_covariance:
-                with open(cov_filename, "rb") as f:
-                    cov_dict = pickle.load(f)
-
         self.parameter_maps = parameter_maps
-        if self.keep_covariance:
-            self.covariance_dict = cov_dict
 
-        self.max_n_comp = max_n_comp
+    def setup_minimal_array(self,
+                            shape,
+                            ):
+        """Set up a minimal array of NaNs
+
+        If WCS is present, will create a fits file. Otherwise
+        a numpy array
+
+        Args:
+            shape: Data shape
+
+        TODO:
+            For fits files, may be worth pulling in units
+        """
+        f = np.zeros(shape) * np.nan
+        if self.wcs_2d is not None:
+            hdr = self.wcs_2d.to_header()
+
+            f = fits.PrimaryHDU(
+                data=f,
+                header=hdr,
+            )
+
+        return f

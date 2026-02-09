@@ -110,40 +110,40 @@ def check_overwrite(
     return False
 
 
-def save_fit_dict(
-    fit_dict,
+def save_pkl(
+    data,
     file_name,
 ):
-    """Save a fit dictionary
+    """Save data to a pkl file
 
     Args:
-        fit_dict: fit dictionary to save
+        data: Data to save
         file_name (str): file to save to
 
     """
 
-    fit_dir = os.path.dirname(file_name)
-    if not os.path.exists(fit_dir):
-        os.makedirs(fit_dir)
+    d = os.path.dirname(file_name)
+    if not os.path.exists(d):
+        os.makedirs(d)
 
     with open(file_name, "wb") as f:
-        pickle.dump(fit_dict, f)
+        pickle.dump(data, f)
 
 
-def load_fit_dict(
+def load_pkl(
     file_name,
 ):
-    """Load a pickled fit dict
+    """Load a pkl file
 
     Args:
         file_name (str): file name to load
 
     Returns:
-        Fit dictionary
+        Unpickled file
 
     """
 
     with open(file_name, "rb") as f:
-        fit_dict = pickle.load(f)
+        pkl = pickle.load(f)
 
-    return fit_dict
+    return pkl

@@ -16,7 +16,7 @@ from tqdm import tqdm
 from .emcee_funcs import get_burn_in_thin, get_samples_from_fit_dict
 from .fitting import HyperfineFitter, chi_square
 from .fitting import get_fits_from_samples
-from .utils import load_fit_dict, get_dict_val
+from .utils import load_pkl, get_dict_val
 
 ALLOWED_FILE_EXTS = [
     "png",
@@ -35,26 +35,29 @@ glob_vel = np.array([])
 
 glob_config = {}
 
+glob_mcfine_output = {}
+
 
 def parallel_step(
     ij,
     plot_name="step",
     fit_dict_filename="fit_dict",
-    n_comp=None,
+    consolidate_fit_dict=True,
 ):
     """Wrapper to parallelise step plotting"""
 
-    if n_comp is None:
-        raise Warning("n_comp should be defined!")
-
     i, j = ij[0], ij[1]
 
-    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+    if consolidate_fit_dict:
+        fit_dict = glob_mcfine_output["fit"].get(i, {}).get(j, {})
+    else:
+        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+        fit_dict = load_pkl(cube_fit_dict_filename)
 
-    n_comp_pix = int(n_comp[i, j])
-    if n_comp_pix == 0:
+    n_comp = fit_dict["n_comp"]
+
+    if n_comp == 0:
         return True
-    fit_dict = load_fit_dict(cube_fit_dict_filename)
 
     if "sampler" not in fit_dict:
         logger.warning("Can only produce step plots when emcee sampler is present")
@@ -65,7 +68,7 @@ def parallel_step(
     plot_step(
         sampler,
         plot_name=cube_plot_name,
-        n_comp=n_comp_pix,
+        n_comp=n_comp,
     )
 
     return True
@@ -169,24 +172,22 @@ def parallel_corner(
     ij,
     plot_name="corner",
     fit_dict_filename=None,
-    n_comp=None,
+    consolidate_fit_dict=True,
 ):
     """Wrapper to parallelise corner plotting"""
 
-    if fit_dict_filename is None:
-        logger.warning("sampler_filename should be defined!")
-        sys.exit()
-    if n_comp is None:
-        logger.warning("n_comp should be defined!")
-        sys.exit()
-
     i, j = ij[0], ij[1]
-    n_comp_pix = int(n_comp[i, j])
 
-    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-    if n_comp_pix == 0:
+    if consolidate_fit_dict:
+        fit_dict = glob_mcfine_output["fit"].get(i, {}).get(j, {})
+    else:
+        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+        fit_dict = load_pkl(cube_fit_dict_filename)
+
+    n_comp = fit_dict["n_comp"]
+
+    if n_comp == 0:
         return True
-    fit_dict = load_fit_dict(cube_fit_dict_filename)
 
     flat_samples = get_samples_from_fit_dict(
         fit_dict,
@@ -198,7 +199,7 @@ def parallel_corner(
     plot_corner(
         flat_samples,
         plot_name=cube_plot_name,
-        n_comp=n_comp_pix,
+        n_comp=n_comp,
     )
 
     return True
@@ -251,6 +252,7 @@ def plot_corner(
 def parallel_plot_fit(
     ij,
     fit_dict_filename=None,
+    consolidate_fit_dict=True,
     loc_image=None,
     n_comp=None,
     plot_name="fit",
@@ -264,31 +266,27 @@ def parallel_plot_fit(
 ):
     """Wrapper to parallelise fit spectrum plotting"""
 
-    if fit_dict_filename is None:
-        logger.warning("fit_dict_filename should be defined!")
-        sys.exit()
-
-    if n_comp is None:
-        logger.warning("n_comp should be defined!")
-        sys.exit()
-
     i, j = ij[0], ij[1]
 
-    cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
-    n_comp_pix = int(n_comp[i, j])
+    if consolidate_fit_dict:
+        fit_dict = glob_mcfine_output["fit"].get(i, {}).get(j, {})
+    else:
+        cube_fit_dict_filename = f"{fit_dict_filename}_{i}_{j}.pkl"
+        fit_dict = load_pkl(cube_fit_dict_filename)
+
+    n_comp = fit_dict["n_comp"]
+
     data = glob_data[:, i, j]
     error = glob_error[:, i, j]
-    if n_comp_pix > 0:
-        fit_dict = load_fit_dict(cube_fit_dict_filename)
-
+    if n_comp > 0:
         flat_samples = get_samples_from_fit_dict(
             fit_dict,
             burn_in_frac=glob_config["burn_in"],
             thin_frac=glob_config["thin"],
         )
-
     else:
         flat_samples = None
+
     cube_plot_name = f"{plot_name}_{i}_{j}"
 
     # Figure out the optimum figure size
@@ -306,7 +304,7 @@ def parallel_plot_fit(
         loc_image=loc_image,
         i=i,
         j=j,
-        n_comp=n_comp_pix,
+        n_comp=n_comp,
         plot_name=cube_plot_name,
         show_individual_components=show_individual_components,
         show_hyperfine_components=show_hyperfine_components,
@@ -553,10 +551,14 @@ class HyperfinePlotter(HyperfineFitter):
         for k in keys_to_glob:
             glob_config[k] = self.__dict__[k]
 
+        # Keep track if we've already loaded in the big
+        # mcfine output
+        self.mcfine_output_loaded = False
+
     def plot_step(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
+        mcfine_output_filename=None,
         plot_name=None,
         grid=None,
     ):
@@ -565,8 +567,8 @@ class HyperfinePlotter(HyperfineFitter):
         Args:
             fit_dict_filename (str): Name for the file containing the fit parameters.
                 Defaults to None, which will pull from config.toml
-            n_comp_filename (str): Name for the file containing the n_comp map. Only
-                used for cubes. Defaults to None, which will pull from config.toml
+            mcfine_output_filename (str): Name for the mcfine output.
+                Defaults to None, which will pull from config.toml
             plot_name (str): Output plot name. Defaults to None, which will pull from
                 config.toml
             grid (np.ndarray): If fitting a cube, can pass a ndarray of 1 (plot) and 0
@@ -582,6 +584,15 @@ class HyperfinePlotter(HyperfineFitter):
                 key="fit_dict_filename",
             )
 
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="mcfine_output_filename",
+                logger=self.logger,
+            )
+
         if plot_name is None:
             plot_name = get_dict_val(
                 self.config,
@@ -591,7 +602,7 @@ class HyperfinePlotter(HyperfineFitter):
             )
 
         if self.data_type == "spectrum":
-            fit_dict = load_fit_dict(f"{fit_dict_filename}.pkl")
+            fit_dict = load_pkl(f"{fit_dict_filename}.pkl")
 
             n_comp = fit_dict["n_comp"]
 
@@ -613,6 +624,12 @@ class HyperfinePlotter(HyperfineFitter):
 
         elif self.data_type == "cube":
 
+            # Load in the mcfine output as a global variable, if we haven't already
+            if not self.mcfine_output_loaded:
+                global glob_mcfine_output
+                glob_mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
+                self.mcfine_output_loaded = True
+
             chunksize = get_dict_val(
                 self.config,
                 self.config_defaults,
@@ -620,15 +637,6 @@ class HyperfinePlotter(HyperfineFitter):
                 key="chunksize",
             )
 
-            if n_comp_filename is None:
-                n_comp_filename = get_dict_val(
-                    self.config,
-                    self.config_defaults,
-                    table="multicomponent_fitter",
-                    key="n_comp_filename",
-                )
-
-            n_comp = np.load(f"{n_comp_filename}.npy")
             if grid is None:
                 grid = self.mask
 
@@ -647,7 +655,7 @@ class HyperfinePlotter(HyperfineFitter):
                                 parallel_step,
                                 plot_name=plot_name,
                                 fit_dict_filename=fit_dict_filename,
-                                n_comp=n_comp,
+                                consolidate_fit_dict=self.consolidate_fit_dict,
                             ),
                             ij_list,
                             chunksize=chunksize,
@@ -662,7 +670,7 @@ class HyperfinePlotter(HyperfineFitter):
     def plot_corner(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
+        mcfine_output_filename=None,
         plot_name=None,
         grid=None,
     ):
@@ -671,8 +679,8 @@ class HyperfinePlotter(HyperfineFitter):
         Args:
             fit_dict_filename (str): Name for the file containing the fit parameters.
                 Defaults to None, which will pull from config.toml
-            n_comp_filename (str): Name for the file containing the n_comp map. Only
-                used for cubes. Defaults to None, which will pull from config.toml
+            mcfine_output_filename (str): Name for the mcfine output.
+                Defaults to None, which will pull from config.toml
             plot_name (str): Output plot name. Defaults to None, which will pull from
                 config.toml
             grid (np.ndarray): If fitting a cube, can pass a ndarray of 1 (plot) and 0
@@ -688,6 +696,15 @@ class HyperfinePlotter(HyperfineFitter):
                 key="fit_dict_filename",
             )
 
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
+                self.config,
+                self.config_defaults,
+                table="multicomponent_fitter",
+                key="mcfine_output_filename",
+                logger=self.logger,
+            )
+
         if plot_name is None:
             plot_name = get_dict_val(
                 self.config,
@@ -697,7 +714,7 @@ class HyperfinePlotter(HyperfineFitter):
             )
 
         if self.data_type == "spectrum":
-            fit_dict = load_fit_dict(f"{fit_dict_filename}.pkl")
+            fit_dict = load_pkl(f"{fit_dict_filename}.pkl")
 
             n_comp = fit_dict["n_comp"]
 
@@ -718,6 +735,12 @@ class HyperfinePlotter(HyperfineFitter):
 
         elif self.data_type == "cube":
 
+            # Load in the mcfine output as a global variable, if we haven't already
+            if not self.mcfine_output_loaded:
+                global glob_mcfine_output
+                glob_mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
+                self.mcfine_output_loaded = True
+
             chunksize = get_dict_val(
                 self.config,
                 self.config_defaults,
@@ -725,15 +748,6 @@ class HyperfinePlotter(HyperfineFitter):
                 key="chunksize",
             )
 
-            if n_comp_filename is None:
-                n_comp_filename = get_dict_val(
-                    self.config,
-                    self.config_defaults,
-                    table="multicomponent_fitter",
-                    key="n_comp_filename",
-                )
-
-            n_comp = np.load(f"{n_comp_filename}.npy")
             if grid is None:
                 grid = self.mask
 
@@ -752,7 +766,7 @@ class HyperfinePlotter(HyperfineFitter):
                                 parallel_corner,
                                 plot_name=plot_name,
                                 fit_dict_filename=fit_dict_filename,
-                                n_comp=n_comp,
+                                consolidate_fit_dict=self.consolidate_fit_dict,
                             ),
                             ij_list,
                             chunksize=chunksize,
@@ -765,7 +779,7 @@ class HyperfinePlotter(HyperfineFitter):
     def plot_fit(
         self,
         fit_dict_filename=None,
-        n_comp_filename=None,
+        mcfine_output_filename=None,
         plot_name=None,
         grid=None,
         loc_image=None,
@@ -775,8 +789,8 @@ class HyperfinePlotter(HyperfineFitter):
         Args:
             fit_dict_filename (str): Name for the file containing the fit parameters.
                 Defaults to None, which will pull from config.toml
-            n_comp_filename (str): Name for the file containing the n_comp map. Only
-                used for cubes. Defaults to None, which will pull from config.toml
+            mcfine_output_filename (str): Name for the mcfine output.
+                Defaults to None, which will pull from config.toml
             plot_name (str): Output plot name. Defaults to None, which will pull from
                 config.toml
             grid (np.ndarray): If fitting a cube, can pass a ndarray of 1 (plot) and 0
@@ -794,13 +808,16 @@ class HyperfinePlotter(HyperfineFitter):
                 table="multicomponent_fitter",
                 key="fit_dict_filename",
             )
-        if n_comp_filename is None:
-            n_comp_filename = get_dict_val(
+
+        if mcfine_output_filename is None:
+            mcfine_output_filename = get_dict_val(
                 self.config,
                 self.config_defaults,
                 table="multicomponent_fitter",
-                key="n_comp_filename",
+                key="mcfine_output_filename",
+                logger=self.logger,
             )
+
         if plot_name is None:
             plot_name = get_dict_val(
                 self.config,
@@ -859,7 +876,7 @@ class HyperfinePlotter(HyperfineFitter):
         )
 
         if self.data_type == "spectrum":
-            fit_dict = load_fit_dict(f"{fit_dict_filename}.pkl")
+            fit_dict = load_pkl(f"{fit_dict_filename}.pkl")
             n_comp = fit_dict["n_comp"]
 
             if n_comp == 0:
@@ -871,7 +888,7 @@ class HyperfinePlotter(HyperfineFitter):
                     thin_frac=self.thin,
                 )
 
-            self.fit(
+            plot_fit(
                 flat_samples=flat_samples,
                 data=self.data,
                 error=self.error,
@@ -888,9 +905,11 @@ class HyperfinePlotter(HyperfineFitter):
 
         elif self.data_type == "cube":
 
-            n_comp = np.load(f"{n_comp_filename}.npy")
-            if grid is None:
-                grid = self.mask
+            # Load in the mcfine output as a global variable, if we haven't already
+            if not self.mcfine_output_loaded:
+                global glob_mcfine_output
+                glob_mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
+                self.mcfine_output_loaded = True
 
             chunksize = get_dict_val(
                 self.config,
@@ -898,6 +917,9 @@ class HyperfinePlotter(HyperfineFitter):
                 table="plotting",
                 key="chunksize",
             )
+
+            if grid is None:
+                grid = self.mask
 
             ij_list = [
                 (i, j)
@@ -913,9 +935,9 @@ class HyperfinePlotter(HyperfineFitter):
                             partial(
                                 parallel_plot_fit,
                                 fit_dict_filename=fit_dict_filename,
+                                consolidate_fit_dict=self.consolidate_fit_dict,
                                 plot_name=plot_name,
                                 loc_image=loc_image,
-                                n_comp=n_comp,
                                 show_individual_components=show_individual_components,
                                 show_hyperfine_components=show_hyperfine_components,
                                 n_points=n_points,

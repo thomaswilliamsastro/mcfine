@@ -27,8 +27,7 @@ are not strictly necessary. We also set up some directories for the individual f
     target = "g316_75"
 
     fit_dict_filename = f"{target}_fit_dict"
-    n_comp_filename = f"{target}_n_comp"
-    likelihood_filename = f"{target}_likelihood"
+    mcfine_output_filename = f"{target}_mcfine_output"
     fit_cube_filename = f"{target}_fit_cube"
     hdu_name = f"{target}.fits"
 
@@ -63,7 +62,8 @@ pixels to fit:
     nan_mask = np.where(mask == 0)
 
 We can now throw this all into ``mcfine``! We'll pass the ``data`` here as the path to the .fits file, as that will
-tell ``mcfine`` to load this in using spectral cube (and also extract the velocity axis).
+tell ``mcfine`` to load this in using spectral cube (and also extract the velocity axis). Note that when you do this,
+output maps will be saved as a dictionary of fits files, complete with WCS information.
 
 .. code-block:: python
 
@@ -82,7 +82,7 @@ We start with a first pass through, fitting all pixels defined by our mask:
 
     print("First-pass fitting")
     hf_fitter.multicomponent_fitter(fit_dict_filename=os.path.join(original_fit_dir, fit_dict_filename),
-                                    n_comp_filename=os.path.join(original_fit_dir, n_comp_filename),
+                                    mcfine_output_filename=os.path.join(original_fit_dir, mcfine_output_filename),
                                     likelihood_filename=os.path.join(original_fit_dir, likelihood_filename),
                                     )
 
@@ -96,15 +96,15 @@ with neighbours, but typically will only replace 10% or less of the fits
     hf_fitter.encourage_spatial_coherence(fit_dict_filename=fit_dict_filename,
                                           input_dir=original_fit_dir,
                                           output_dir=coherence_forward_dir,
-                                          n_comp_filename=n_comp_filename,
-                                          likelihood_filename=likelihood_filename,
+                                          mcfine_input_filename=os.path.join(original_fit_dir, mcfine_output_filename),
+                                          mcfine_output_filename=os.path.join(coherence_forward_dir, mcfine_output_filename),
                                           )
     print("Spatial coherence backwards")
     hf_fitter.encourage_spatial_coherence(fit_dict_filename=fit_dict_filename,
                                           input_dir=coherence_forward_dir,
                                           output_dir=coherence_backward_dir,
-                                          n_comp_filename=n_comp_filename,
-                                          likelihood_filename=likelihood_filename,
+                                          mcfine_input_filename=os.path.join(coherence_forward_dir, mcfine_output_filename),
+                                          mcfine_output_filename=os.path.join(coherence_backward_dir, mcfine_output_filename),
                                           reverse_direction=True,
                                           )
 
@@ -113,14 +113,12 @@ Following this, fitting is complete! We will now generate parameter maps and the
 .. code-block:: python
 
     print("Creating maps")
-    hf_fitter.make_parameter_maps(n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
-                                  fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
+    hf_fitter.make_parameter_maps(mcfine_output_filename=os.path.join(coherence_backward_dir, mcfine_output_filename),
                                   maps_filename=f"{target}_maps.pkl",
                                   )
 
     print("Creating fit cubes")
-    hf_fitter.create_fit_cube(fit_dict_filename=os.path.join(coherence_backward_dir, fit_dict_filename),
-                              n_comp_filename=os.path.join(coherence_backward_dir, n_comp_filename),
+    hf_fitter.create_fit_cube(mcfine_output_filename=os.path.join(coherence_backward_dir, mcfine_output_filename),
                               cube_filename=fit_cube_filename)
 
 This is now everything done! We can now explore the cube in :doc:`exploring cube fits <exploring_cube_fits>`

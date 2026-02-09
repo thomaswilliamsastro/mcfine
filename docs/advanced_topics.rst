@@ -2,6 +2,15 @@
 Advanced Topics
 ###############
 
+==============================
+Consolidating fit dictionaries
+==============================
+
+To reduce the amount of disk I/O, by default the individual fit dictionaries will be gathered up (along with some useful
+meta information) into an overall fit dictionary. If you're working with the full samplers for huge cubes, this file
+may be too large to handle on a machine. In which case, you may wish to set ``consolidate_fit_dict = false`` in the
+``fitting_parameters`` section of the config file.
+
 ==================================
 Initial fitting using downsampling
 ==================================
@@ -179,8 +188,8 @@ you can generate samples like:
    import numpy as np
 
    samples = np.random.multivariate_normal(
-                    par_dict[f"{i}_{j}"]["cov"]["med"],
-                    par_dict[f"{i}_{j}"]["cov"]["matrix"],
+                    par_dict[f"{i}_{j}"]["cov_med"],
+                    par_dict[f"{i}_{j}"]["cov_matrix"],
                     size=10000,
              )
 
