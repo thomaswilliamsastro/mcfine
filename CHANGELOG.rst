@@ -3,7 +3,7 @@ Changelog
 #########
 
 ================
-0.4 (Unreleased)
+0.4 (2026-02-11)
 ================
 
 * Fix bug if 0-component fit found in calculating best-fit parameters
