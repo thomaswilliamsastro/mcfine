@@ -35,6 +35,17 @@ still then fit additional components and remove them independently per-spaxel.
                               downsample_factor=10,
                               )
 
+=====================
+Different fit methods
+=====================
+
+The default behaviour of mcfine is to use MCMC to explore every potential fit after the
+initial guesses for parameters. This is robust, but slow. By setting ``fit_method = "leastsq"``
+in the ``fit_parameters`` section of the config, you can instead just make use of the least-squares
+guesses for the parameters, and then mcfine will only run an MCMC once, after a final number of
+components and initial guesses for the parameters for each component has been calculated. This
+leads to a speed up of around a factor 4 with a negligible change in the fit quality, so is useful
+for large datasets.
 
 ===================
 Different fit types

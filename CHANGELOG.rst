@@ -6,6 +6,10 @@ Changelog
 0.4 (Unreleased)
 ================
 
+* Fix bug if 0-component fit found in calculating best-fit parameters
+* Fix bug with mask not being defined if fitting spectrum
+* Implemented fit method "leastsq", which will run least squares until a final number of components has been
+  settled on, then MCMC to get sampler/covariances
 * Fix bug in the BIC looping where the wrong BIC/AIC could be used
 * Move to a more cohesive overall pkl data structure
 * Move to using spectral_cube
