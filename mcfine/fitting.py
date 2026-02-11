@@ -13,6 +13,7 @@ from functools import partial
 
 import emcee
 import numpy as np
+import specutils
 import xarray
 from astropy import units as u
 from astropy.io import fits
@@ -23,6 +24,9 @@ from specutils import Spectrum
 from specutils.fitting import find_lines_derivative
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
+
+# Suppress specutils warning about continuum level
+specutils.conf.do_continuum_function_check = False
 
 NDRADEX_IMPORTED = False
 try:
@@ -430,7 +434,10 @@ def calculate_goodness_of_fit(
 
     m = len(data[~np.isnan(data)])
     ln_m = np.log(m)
-    k = len(best_fit_pars)
+    if best_fit_pars is None:
+        k = 0
+    else:
+        k = len(best_fit_pars)
 
     if n_comp > 0:
         total_model = multiple_components(
@@ -546,6 +553,7 @@ def parallel_fitting(
     ij,
     fit_dict_filename="fit_dict",
     data_type="original",
+    fit_method="mcmc",
     overwrite=False,
 ):
     """Parallel function for MCMC fitting.
@@ -558,6 +566,11 @@ def parallel_fitting(
         fit_dict_filename (str): Base filename for MCMC ft pickle. Will append coordinates on afterward. Defaults
             to fit_dict.
         data_type: Data type to fit. Can be either "original" or "downsampled"
+        fit_method: "mcmc" or "leastsq". "mcmc" will run emcee
+            for each component and use fit parameters from that,
+            whereas "leastsq" will only run an MCMC after a
+            final fit has been found, to explore covariances.
+            Defaults to "mcmc".
         overwrite (bool): Overwrite existing files? Defaults to False.
 
     Returns:
@@ -597,6 +610,7 @@ def parallel_fitting(
             fit_dict = delta_bic_looper(
                 data=data,
                 error=error,
+                fit_method=fit_method,
                 initial_n_comp=initial_n_comp,
             )
 
@@ -615,6 +629,7 @@ def parallel_fitting(
 def delta_bic_looper(
     data,
     error,
+    fit_method="mcmc",
     initial_n_comp=None,
     save=False,
     overwrite=True,
@@ -629,6 +644,11 @@ def delta_bic_looper(
     Args:
         data: Observed data
         error: Observed error
+        fit_method: "mcmc" or "leastsq". "mcmc" will run emcee
+            for each component and use fit parameters from that,
+            whereas "leastsq" will only run an MCMC after a
+            final fit has been found, to explore covariances.
+            Defaults to "mcmc".
         initial_n_comp: Initial guess at number of components.
             Defaults to None.
         save: Whether to save out or not, defaults to False
@@ -641,143 +661,47 @@ def delta_bic_looper(
 
     delta_bic = np.inf
     delta_aic = np.inf
+    parameter_median_old = None
     sampler_old = None
-    likelihood_old = None
     sampler = None
     best_fit_pars = None
     best_fit_errs = None
     cov_matrix = None
     cov_med = None
     prop_len = len(glob_config["props"])
-    ln_m = np.log(len(data[~np.isnan(data)]))
 
     if initial_n_comp is None:
         # We start with a zero component model, i.e. a flat line
         n_comp = 0
-        likelihood = ln_like(
-            theta=0,
-            intensity=data,
-            intensity_err=error,
-            vel=glob_vel,
-            strength_lines=glob_config["strength_lines"],
-            v_lines=glob_config["v_lines"],
-            props=glob_config["props"],
+        parameter_median = None
+
+        gof = calculate_goodness_of_fit(
+            data=data,
+            error=error,
+            best_fit_pars=parameter_median,
             n_comp=n_comp,
-            fit_type=glob_config["fit_type"],
         )
-        bic = -2 * likelihood
-        aic = -2 * likelihood
+        bic = gof["bic"]
+        aic = gof["aic"]
 
     else:
         # Start with an initial guess of component numbers
         n_comp = int(initial_n_comp)
-        k = n_comp * prop_len
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            sampler = run_mcmc(
-                data,
-                error,
-                n_comp=n_comp,
-                save=save,
-                overwrite=overwrite,
-                progress=progress,
-            )
 
-        # Calculate max likelihood parameters and BIC
-        flat_samples = get_samples(
-            sampler,
-            burn_in_frac=glob_config["burn_in"],
-            thin_frac=glob_config["thin"],
-        )
-        parameter_median = np.nanmedian(
-            flat_samples,
-            axis=0,
-        )
-        likelihood = ln_like(
-            theta=parameter_median,
-            intensity=data,
-            intensity_err=error,
-            vel=glob_vel,
-            strength_lines=glob_config["strength_lines"],
-            v_lines=glob_config["v_lines"],
-            props=glob_config["props"],
-            n_comp=n_comp,
-            fit_type=glob_config["fit_type"],
-        )
+        # If we're doing MCMC
+        if fit_method == "mcmc":
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sampler = run_mcmc(
+                    data,
+                    error,
+                    n_comp=n_comp,
+                    save=save,
+                    overwrite=overwrite,
+                    progress=progress,
+                )
 
-        # Calculate BIC and AIC
-        bic = k * ln_m - 2 * likelihood
-        aic = 2 * k - 2 * likelihood
-
-    bic_old = bic
-    aic_old = aic
-
-    while (
-        delta_bic > glob_config["delta_bic_cutoff"]
-        or delta_aic > glob_config["delta_aic_cutoff"]
-    ):
-        # Store the previous BIC and sampler, since we need them later
-        bic_old = bic
-        aic_old = aic
-        sampler_old = sampler
-        likelihood_old = likelihood
-
-        # Increase the number of components, refit
-        n_comp += 1
-        k = n_comp * prop_len
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            sampler = run_mcmc(
-                data,
-                error,
-                n_comp=n_comp,
-                save=save,
-                overwrite=overwrite,
-                progress=progress,
-            )
-
-        # Calculate max likelihood parameters and BIC
-        flat_samples = get_samples(
-            sampler,
-            burn_in_frac=glob_config["burn_in"],
-            thin_frac=glob_config["thin"],
-        )
-        parameter_median = np.nanmedian(
-            flat_samples,
-            axis=0,
-        )
-        likelihood = ln_like(
-            theta=parameter_median,
-            intensity=data,
-            intensity_err=error,
-            vel=glob_vel,
-            strength_lines=glob_config["strength_lines"],
-            v_lines=glob_config["v_lines"],
-            props=glob_config["props"],
-            n_comp=n_comp,
-            fit_type=glob_config["fit_type"],
-        )
-
-        # Calculate BIC and AIC
-        bic = k * ln_m - 2 * likelihood
-        delta_bic = bic_old - bic
-
-        aic = 2 * k - 2 * likelihood
-        delta_aic = aic_old - aic
-
-    # Move back to the previous values
-    bic = bic_old
-    aic = aic_old
-    sampler = sampler_old
-    likelihood = likelihood_old
-    n_comp -= 1
-
-    # Now loop backwards, iteratively remove the weakest component and refit. Only if we have a >0 order fit!
-
-    if n_comp > 0:
-        max_back_loops = n_comp
-
-        for i in range(max_back_loops):
+            # Get flat samples and calculate median parameters
             flat_samples = get_samples(
                 sampler,
                 burn_in_frac=glob_config["burn_in"],
@@ -787,6 +711,106 @@ def delta_bic_looper(
                 flat_samples,
                 axis=0,
             )
+
+        # Do a leastsq fit
+        elif fit_method == "leastsq":
+            parameter_median = get_p0_lmfit(
+                data,
+                error,
+                n_comp=n_comp,
+            )
+
+        else:
+            raise ValueError(f"fit_method should be one of {ALLOWED_FIT_METHODS}")
+
+        # Calculate goodness of fit, pull out likelihood/BIC/AIC
+        gof = calculate_goodness_of_fit(
+            data=data,
+            error=error,
+            best_fit_pars=parameter_median,
+            n_comp=n_comp,
+        )
+        bic = gof["bic"]
+        aic = gof["aic"]
+
+    parameter_median_old = parameter_median
+    bic_old = bic
+    aic_old = aic
+
+    while (
+        delta_bic > glob_config["delta_bic_cutoff"]
+        or delta_aic > glob_config["delta_aic_cutoff"]
+    ):
+        # Store the previous BIC and sampler, since we need them later
+        parameter_median_old = parameter_median
+        sampler_old = sampler
+        bic_old = bic
+        aic_old = aic
+
+        # Increase the number of components, refit
+        n_comp += 1
+
+        # If we're doing MCMC
+        if fit_method == "mcmc":
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sampler = run_mcmc(
+                    data,
+                    error,
+                    n_comp=n_comp,
+                    save=save,
+                    overwrite=overwrite,
+                    progress=progress,
+                )
+
+            # Get flat samples and calculate median parameters
+            flat_samples = get_samples(
+                sampler,
+                burn_in_frac=glob_config["burn_in"],
+                thin_frac=glob_config["thin"],
+            )
+            parameter_median = np.nanmedian(
+                flat_samples,
+                axis=0,
+            )
+
+        # Do a leastsq fit
+        elif fit_method == "leastsq":
+            parameter_median = get_p0_lmfit(
+                data,
+                error,
+                n_comp=n_comp,
+            )
+
+        else:
+            raise ValueError(f"fit_method should be one of {ALLOWED_FIT_METHODS}")
+
+        # Calculate goodness of fit, pull out likelihood/BIC/AIC
+        gof = calculate_goodness_of_fit(
+            data=data,
+            error=error,
+            best_fit_pars=parameter_median,
+            n_comp=n_comp,
+        )
+        bic = gof["bic"]
+        aic = gof["aic"]
+
+        delta_bic = bic_old - bic
+        delta_aic = aic_old - aic
+
+    # Move back to the previous values
+    parameter_median = parameter_median_old
+    sampler = sampler_old
+    bic = bic_old
+    aic = aic_old
+    n_comp -= 1
+
+    # Now loop backwards, iteratively remove the weakest component and refit. Only if we have a >0 order fit!
+
+    if n_comp > 0:
+        max_back_loops = n_comp
+
+        for i in range(max_back_loops):
 
             if glob_config["fit_type"] == "lte":
                 line_intensities = np.array(
@@ -834,63 +858,69 @@ def delta_bic_looper(
 
             bic_old = bic
             aic_old = aic
+            parameter_median_old = parameter_median
             sampler_old = sampler
 
             # Remove the weakest component
             n_comp -= 1
 
             if n_comp == 0:
-                likelihood = ln_like(
-                    theta=0,
-                    intensity=data,
-                    intensity_err=error,
-                    vel=glob_vel,
-                    strength_lines=glob_config["strength_lines"],
-                    v_lines=glob_config["v_lines"],
-                    props=glob_config["props"],
+                parameter_median = None
+                gof = calculate_goodness_of_fit(
+                    data=data,
+                    error=error,
+                    best_fit_pars=parameter_median,
                     n_comp=n_comp,
-                    fit_type=glob_config["fit_type"],
                 )
-                bic = -2 * likelihood
+                bic = gof["bic"]
+                aic = gof["aic"]
             else:
-                k = n_comp * prop_len
                 idx_to_delete = range(
                     prop_len * component_order[0],
                     prop_len * component_order[0] + prop_len,
                 )
                 p0 = np.delete(parameter_median, idx_to_delete)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    sampler = run_mcmc(
-                        data,
-                        error,
-                        n_comp=n_comp,
-                        save=save,
-                        overwrite=overwrite,
-                        progress=progress,
-                        p0_fit=p0,
+
+                # If we're doing MCMC
+                if fit_method == "mcmc":
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        sampler = run_mcmc(
+                            data,
+                            error,
+                            n_comp=n_comp,
+                            save=save,
+                            overwrite=overwrite,
+                            progress=progress,
+                            p0_fit=p0,
+                        )
+
+                    # Get flat samples and calculate median parameters
+                    flat_samples = get_samples(
+                        sampler,
+                        burn_in_frac=glob_config["burn_in"],
+                        thin_frac=glob_config["thin"],
+                    )
+                    parameter_median = np.nanmedian(flat_samples, axis=0)
+
+                # If doing a leastsq fit, we already have p0
+                elif fit_method == "leastsq":
+                    parameter_median = p0
+
+                else:
+                    raise ValueError(
+                        f"fit_method should be one of {ALLOWED_FIT_METHODS}"
                     )
 
-                # Calculate max likelihood parameters and BIC
-                flat_samples = get_samples(
-                    sampler,
-                    burn_in_frac=glob_config["burn_in"],
-                    thin_frac=glob_config["thin"],
-                )
-                parameter_median = np.nanmedian(flat_samples, axis=0)
-                likelihood = ln_like(
-                    theta=parameter_median,
-                    intensity=data,
-                    intensity_err=error,
-                    vel=glob_vel,
-                    strength_lines=glob_config["strength_lines"],
-                    v_lines=glob_config["v_lines"],
-                    props=glob_config["props"],
+                # Calculate goodness of fit, pull out likelihood/BIC/AIC
+                gof = calculate_goodness_of_fit(
+                    data=data,
+                    error=error,
+                    best_fit_pars=parameter_median,
                     n_comp=n_comp,
-                    fit_type=glob_config["fit_type"],
                 )
-                bic = k * ln_m - 2 * likelihood
-                aic = 2 * k - 2 * likelihood
+                bic = gof["bic"]
+                aic = gof["aic"]
 
             delta_bic = bic_old - bic
             delta_aic = aic_old - aic
@@ -903,8 +933,24 @@ def delta_bic_looper(
                 break
 
         # Revert to previous sampler/n_comp
+        parameter_median = parameter_median_old
         sampler = sampler_old
         n_comp += 1
+
+    # Finally, if we've been using leastsq method and we have fitted
+    # components, then run an MCMC here
+    if fit_method == "leastsq" and n_comp > 0:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sampler = run_mcmc(
+                data,
+                error,
+                n_comp=n_comp,
+                save=save,
+                overwrite=overwrite,
+                progress=progress,
+                p0_fit=parameter_median,
+            )
 
     # Calculate the covariance matrix and the parameter medians/errors.
     # This is only defined if we end up with a 0-component fit
@@ -999,211 +1045,18 @@ def run_mcmc(
         progress: Whether to display progress bar. Defaults to False
         fit_dict_filename: Name for the sampler. Defaults to fit_dict.pkl
         p0_fit: Initial guess for the fit. Defaults to None, which will
-            use some basic parameters that are likely to be suboptimal
+            use some basic parameters
     """
-
-    prop_len = len(glob_config["props"])
-
-    bounds = glob_config["bounds"] * n_comp
 
     if not os.path.exists(fit_dict_filename) or overwrite:
 
+        # If we don't have p0_fit, get from lmfit
         if p0_fit is None:
-
-            vel_idx = np.where(np.array(glob_config["props"]) == "v")[0][0]
-
-            # Pull in any relevant kwargs
-            kwargs = {}
-
-            for config_dict in [glob_config["config_defaults"], glob_config["config"]]:
-                if "lmfit" in config_dict:
-                    for key in config_dict["lmfit"]:
-                        kwargs[key] = config_dict["lmfit"][key]
-
-            # We have a default here set to add minimizer_kwargs,
-            # which will crash for minimizers that don't support this
-            minimizers_with_minimizer_kwargs = [
-                "basinhopping",
-                "dual_annealing",
-                "shgo",
-            ]
-
-            if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
-                kwargs.pop("minimizer_kwargs", None)
-
-            # Find any NaNs in data or error maps
-            good_idx = np.where(np.logical_and(np.isfinite(data), np.isfinite(error)))
-
-            # And the velocity resolution
-            dv = np.abs(np.nanmedian(np.diff(glob_vel)))
-
-            p0 = np.array(glob_config["p0"] * n_comp)
-
-            # Do the default method, where we brute force through
-            # the least squares
-            if glob_config["lmfit_method"] == "default":
-
-                # Move the velocities a channel to encourage parameter space hunting
-
-                for i in range(n_comp):
-                    p0[prop_len * i + vel_idx] += i * dv
-
-                params = Parameters()
-                p0_idx = 0
-                for i in range(n_comp):
-                    for j in range(prop_len):
-                        params.add(
-                            f"{glob_config["props"][j]}_{i}",
-                            value=p0[p0_idx],
-                            min=bounds[j][0],
-                            max=bounds[j][1],
-                        )
-                        p0_idx += 1
-
-                # Use lmfit to get an initial fit
-                lmfit_result = minimize(
-                    fcn=initial_lmfit,
-                    params=params,
-                    args=(
-                        data[good_idx],
-                        error[good_idx],
-                        glob_vel[good_idx],
-                        glob_config["strength_lines"],
-                        glob_config["v_lines"],
-                        glob_config["props"],
-                        n_comp,
-                        glob_config["fit_type"],
-                        True,
-                    ),
-                    **kwargs,
-                )
-
-                p0_fit = np.array(
-                    [lmfit_result.params[key].value for key in lmfit_result.params]
-                )
-
-            # Get an initial guess for the velocities via an iterative method
-            elif glob_config["lmfit_method"] == "iterative":
-
-                # Start with flat line model
-                it_model = np.zeros(len(data))
-
-                lmfit_result = None
-                params = Parameters()
-                p0_fit = np.array([])
-
-                # Convolve will fail if there are NaNs in the spectrum,
-                # so interpolate over them now
-                data_interp = copy.deepcopy(data)
-
-                nan_idx = ~np.isfinite(data_interp)
-                x = np.arange(len(data_interp))
-
-                data_interp[nan_idx] = np.interp(
-                    x[nan_idx],
-                    x[~nan_idx],
-                    data_interp[~nan_idx],
-                )
-
-                for comp in range(n_comp):
-
-                    it_data = data_interp - it_model
-
-                    # Find lines. We impose no flux cut here
-                    # flux_threshold = np.nanmedian(error) * u.K
-                    flux_threshold = None
-                    spec = Spectrum(
-                        flux=it_data * u.K,
-                        spectral_axis=glob_vel * u.km / u.s,
-                    )
-                    found_lines = find_lines_derivative(
-                        spec,
-                        flux_threshold=flux_threshold,
-                    )
-
-                    # Only take emission lines if we have any, else take everything
-                    emission_lines = found_lines[found_lines["line_type"] == "emission"]
-                    if len(emission_lines) > 0:
-                        found_lines = copy.deepcopy(emission_lines)
-
-                    # Now take these lines and order by flux
-                    found_line_fluxes = np.array(
-                        [
-                            float(np.abs(it_data[x]))
-                            for x in found_lines["line_center_index"]
-                        ]
-                    )
-                    found_line_vels = found_lines["line_center"].value
-
-                    # Sort from brightest to faintest, pick the brightest component
-                    idxs = np.argsort(found_line_fluxes)[::-1]
-                    found_line_vel = found_line_vels[idxs][0]
-
-                    # Having found the velocity, we then fit all components to the data
-                    p0 = np.array([float(x) for x in glob_config["p0"]])
-                    p0[vel_idx] = copy.deepcopy(found_line_vel)
-
-                    # Update the parameters with any new best guesses
-                    if lmfit_result is not None:
-                        for key in lmfit_result.params:
-                            params[key].set(value=lmfit_result.params[key].value)
-
-                    for j in range(prop_len):
-                        params.add(
-                            f"{glob_config["props"][j]}_{comp}",
-                            value=p0[j],
-                            min=bounds[j][0],
-                            max=bounds[j][1],
-                        )
-
-                    # Get a fit to the actual data
-                    lmfit_result = minimize(
-                        fcn=initial_lmfit,
-                        params=params,
-                        args=(
-                            data[good_idx],
-                            error[good_idx],
-                            glob_vel[good_idx],
-                            glob_config["strength_lines"],
-                            glob_config["v_lines"],
-                            glob_config["props"],
-                            comp + 1,
-                            glob_config["fit_type"],
-                            True,
-                        ),
-                        **kwargs,
-                    )
-
-                    p0_fit = np.array(
-                        [lmfit_result.params[key].value for key in lmfit_result.params]
-                    )
-
-                    it_model = multiple_components(
-                        p0_fit,
-                        vel=glob_vel,
-                        strength_lines=glob_config["strength_lines"],
-                        v_lines=glob_config["v_lines"],
-                        props=glob_config["props"],
-                        n_comp=comp + 1,
-                        fit_type=glob_config["fit_type"],
-                        log_tau=True,
-                    )
-
-            else:
-
-                raise ValueError(
-                    f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}"
-                )
-
-            # Sort p0 so it has monotonically increasing velocities
-            v0_values = np.array(
-                [p0_fit[prop_len * i + vel_idx] for i in range(n_comp)]
+            p0_fit = get_p0_lmfit(
+                data=data,
+                error=error,
+                n_comp=n_comp,
             )
-            v0_sort = v0_values.argsort()
-            p0_fit_sort = [
-                p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort
-            ]
-            p0_fit = np.array([item for sublist in p0_fit_sort for item in sublist])
 
         # Ensure we have an array here
         if not isinstance(p0_fit, np.ndarray):
@@ -1262,6 +1115,212 @@ def run_mcmc(
         sampler = fit_dict["sampler"]
 
     return sampler
+
+
+def get_p0_lmfit(
+    data,
+    error,
+    n_comp=1,
+):
+    """Get initial guesses for parameters using lmfit
+
+    Args:
+        data: Observed data
+        error: Observed uncertainty
+        n_comp: Number of components to fit. Defaults to 1
+    """
+
+    prop_len = len(glob_config["props"])
+
+    bounds = glob_config["bounds"] * n_comp
+
+    vel_idx = np.where(np.array(glob_config["props"]) == "v")[0][0]
+
+    # Pull in any relevant kwargs
+    kwargs = {}
+
+    for config_dict in [glob_config["config_defaults"], glob_config["config"]]:
+        if "lmfit" in config_dict:
+            for key in config_dict["lmfit"]:
+                kwargs[key] = config_dict["lmfit"][key]
+
+    # We have a default here set to add minimizer_kwargs,
+    # which will crash for minimizers that don't support this
+    minimizers_with_minimizer_kwargs = [
+        "basinhopping",
+        "dual_annealing",
+        "shgo",
+    ]
+
+    if kwargs.get("method", "leastsq") not in minimizers_with_minimizer_kwargs:
+        kwargs.pop("minimizer_kwargs", None)
+
+    # Find any NaNs in data or error maps
+    good_idx = np.where(np.logical_and(np.isfinite(data), np.isfinite(error)))
+
+    # And the velocity resolution
+    dv = np.abs(np.nanmedian(np.diff(glob_vel)))
+
+    p0 = np.array(glob_config["p0"] * n_comp)
+
+    # Do the default method, where we brute force through
+    # the least squares
+    if glob_config["lmfit_method"] == "default":
+
+        # Move the velocities a channel to encourage parameter space hunting
+
+        for i in range(n_comp):
+            p0[prop_len * i + vel_idx] += i * dv
+
+        params = Parameters()
+        p0_idx = 0
+        for i in range(n_comp):
+            for j in range(prop_len):
+                params.add(
+                    f"{glob_config["props"][j]}_{i}",
+                    value=p0[p0_idx],
+                    min=bounds[j][0],
+                    max=bounds[j][1],
+                )
+                p0_idx += 1
+
+        # Use lmfit to get an initial fit
+        lmfit_result = minimize(
+            fcn=initial_lmfit,
+            params=params,
+            args=(
+                data[good_idx],
+                error[good_idx],
+                glob_vel[good_idx],
+                glob_config["strength_lines"],
+                glob_config["v_lines"],
+                glob_config["props"],
+                n_comp,
+                glob_config["fit_type"],
+                True,
+            ),
+            **kwargs,
+        )
+
+        p0_fit = np.array(
+            [lmfit_result.params[key].value for key in lmfit_result.params]
+        )
+
+    # Get an initial guess for the velocities via an iterative method
+    elif glob_config["lmfit_method"] == "iterative":
+
+        # Start with a flat line model
+        it_model = np.zeros(len(data))
+
+        params = Parameters()
+        lmfit_result = None
+        p0_fit = np.array([])
+
+        # Convolve will fail if there are NaNs in the spectrum,
+        # so interpolate over them now
+        data_interp = copy.deepcopy(data)
+
+        nan_idx = ~np.isfinite(data_interp)
+        x = np.arange(len(data_interp))
+
+        data_interp[nan_idx] = np.interp(
+            x[nan_idx],
+            x[~nan_idx],
+            data_interp[~nan_idx],
+        )
+
+        for comp in range(n_comp):
+
+            it_data = data_interp - it_model
+
+            # Find lines. We impose no flux cut here
+            # flux_threshold = np.nanmedian(error) * u.K
+            flux_threshold = None
+            spec = Spectrum(
+                flux=it_data * u.K,
+                spectral_axis=glob_vel * u.km / u.s,
+            )
+            found_lines = find_lines_derivative(
+                spec,
+                flux_threshold=flux_threshold,
+            )
+
+            # Only take emission lines if we have any, else take everything
+            emission_lines = found_lines[found_lines["line_type"] == "emission"]
+            if len(emission_lines) > 0:
+                found_lines = copy.deepcopy(emission_lines)
+
+            # Now take these lines and order by flux
+            found_line_fluxes = np.array(
+                [float(np.abs(it_data[x])) for x in found_lines["line_center_index"]]
+            )
+            found_line_vels = found_lines["line_center"].value
+
+            # Sort from brightest to faintest, pick the brightest component
+            idxs = np.argsort(found_line_fluxes)[::-1]
+            found_line_vel = found_line_vels[idxs][0]
+
+            # Having found the velocity, we then fit all components to the data
+            p0 = np.array([float(x) for x in glob_config["p0"]])
+            p0[vel_idx] = copy.deepcopy(found_line_vel)
+
+            # Update the parameters with any new best guesses
+            if lmfit_result is not None:
+                for key in lmfit_result.params:
+                    params[key].set(value=lmfit_result.params[key].value)
+
+            for j in range(prop_len):
+                params.add(
+                    f"{glob_config["props"][j]}_{comp}",
+                    value=p0[j],
+                    min=bounds[j][0],
+                    max=bounds[j][1],
+                )
+
+            # Get a fit to the actual data
+            lmfit_result = minimize(
+                fcn=initial_lmfit,
+                params=params,
+                args=(
+                    data[good_idx],
+                    error[good_idx],
+                    glob_vel[good_idx],
+                    glob_config["strength_lines"],
+                    glob_config["v_lines"],
+                    glob_config["props"],
+                    comp + 1,
+                    glob_config["fit_type"],
+                    True,
+                ),
+                **kwargs,
+            )
+
+            p0_fit = np.array(
+                [lmfit_result.params[key].value for key in lmfit_result.params]
+            )
+
+            it_model = multiple_components(
+                p0_fit,
+                vel=glob_vel,
+                strength_lines=glob_config["strength_lines"],
+                v_lines=glob_config["v_lines"],
+                props=glob_config["props"],
+                n_comp=comp + 1,
+                fit_type=glob_config["fit_type"],
+                log_tau=True,
+            )
+
+    else:
+
+        raise ValueError(f"lmfit_method should be one of {ALLOWED_LMFIT_METHODS}")
+
+    # Sort p0 so it has monotonically increasing velocities
+    v0_values = np.array([p0_fit[prop_len * i + vel_idx] for i in range(n_comp)])
+    v0_sort = v0_values.argsort()
+    p0_fit_sort = [p0_fit[prop_len * i : prop_len * i + prop_len] for i in v0_sort]
+    p0_fit = np.array([item for sublist in p0_fit_sort for item in sublist])
+
+    return p0_fit
 
 
 def emcee_wrapper(
@@ -1846,14 +1905,15 @@ class HyperfineFitter:
             if mask is None:
                 self.logger.info("No mask provided. Including every pixel")
                 mask = np.ones([data.shape[1], data.shape[2]])
-            self.mask = mask
 
             if self.data.shape != self.error.shape:
                 self.logger.warning("Data and error should be the same shape")
                 sys.exit()
-            if self.data.shape[1:] != self.mask.shape:
+            if self.data.shape[1:] != mask.shape:
                 self.logger.warning("Mask should be 2D projection of data")
                 sys.exit()
+
+        self.mask = mask
 
         line = get_dict_val(
             self.config,
@@ -2622,6 +2682,7 @@ class HyperfineFitter:
                     fit_dict = delta_bic_looper(
                         data,
                         error,
+                        fit_method=self.fit_method,
                         progress=progress,
                     )
 
@@ -2664,6 +2725,7 @@ class HyperfineFitter:
                                     parallel_fitting,
                                     fit_dict_filename=fit_dict_filename,
                                     data_type=data_type,
+                                    fit_method=self.fit_method,
                                     overwrite=overwrite,
                                 ),
                                 ij_list,
@@ -3294,9 +3356,10 @@ class HyperfineFitter:
 
         self.parameter_maps = parameter_maps
 
-    def setup_minimal_array(self,
-                            shape,
-                            ):
+    def setup_minimal_array(
+        self,
+        shape,
+    ):
         """Set up a minimal array of NaNs
 
         If WCS is present, will create a fits file. Otherwise
