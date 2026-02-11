@@ -1,7 +1,7 @@
 [project]
 
 name = "mcfine"
-version = "0.3"
+version = "0.4"
 description = "Monte-Carlo, Multi-Component ISM Fitting"
 readme = "README.md"
 requires-python = ">=3.11"

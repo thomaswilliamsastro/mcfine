@@ -22,7 +22,7 @@ copyright = '2025, Thomas Williams'
 author = 'Thomas Williams'
 
 # The full version, including alpha/beta/rc tags
-release = '0.3'
+release = '0.4'
 
 
 # -- General configuration ---------------------------------------------------
