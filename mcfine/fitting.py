@@ -88,6 +88,7 @@ glob_downsampled_data = np.array([])
 glob_downsampled_error = np.array([])
 
 glob_initial_n_comp = np.array([])
+glob_initial_theta = np.array([], dtype=list)
 
 glob_mcfine_output = {}
 
@@ -601,9 +602,19 @@ def parallel_fitting(
         if data.size == 0:
             raise ValueError("No data found!")
 
+        # Get out initial number of components, if we have them
         initial_n_comp = None
         if glob_initial_n_comp.size != 0:
             initial_n_comp = glob_initial_n_comp[i, j]
+
+        # Get out initial parameters, if we have them
+        initial_pars = None
+        if glob_initial_theta.size != 0:
+            initial_pars = glob_initial_theta[i, j]
+
+            # If we have an empty list, fall back to None
+            if len(initial_pars) == 0:
+                initial_pars = None
 
         # Limit to a single core to avoid weirdness
         with threadpool_limits(limits=1, user_api=None):
@@ -612,6 +623,7 @@ def parallel_fitting(
                 error=error,
                 fit_method=fit_method,
                 initial_n_comp=initial_n_comp,
+                initial_pars=initial_pars,
             )
 
         if not glob_config["keep_sampler"]:
@@ -626,11 +638,87 @@ def parallel_fitting(
     return cube_fit_dict_filename
 
 
+def get_parameters_from_fitting(
+    data,
+    error,
+    n_comp,
+    p0_fit=None,
+    fit_method="mcmc",
+    save=False,
+    overwrite=True,
+    progress=False,
+):
+    """Get fitted parameters, either using MCMC or least-squares
+
+    Args:
+        data: Observed data
+        error: Observed error
+        n_comp: Number of components to fit
+        p0_fit: Initial guess of parameters for MCMC. If least-squares,
+            will just use this. Defaults to None
+        fit_method: "mcmc" or "leastsq". "mcmc" will run emcee
+            for each component and use fit parameters from that,
+            whereas "leastsq" will only run an MCMC after a
+            final fit has been found, to explore covariances.
+            Defaults to "mcmc".
+        save: Whether to save out or not, defaults to False
+        overwrite: Whether to overwrite existing fits. Defaults to False
+        progress: Whether to display progress bars or not. Defaults to False
+
+    Returns:
+        parameter medians
+    """
+
+    # If we're doing MCMC
+    if fit_method == "mcmc":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sampler = run_mcmc(
+                data,
+                error,
+                n_comp=n_comp,
+                save=save,
+                overwrite=overwrite,
+                progress=progress,
+                p0_fit=p0_fit,
+            )
+
+        # Get flat samples and calculate median parameters
+        flat_samples = get_samples(
+            sampler,
+            burn_in_frac=glob_config["burn_in"],
+            thin_frac=glob_config["thin"],
+        )
+        parameter_median = np.nanmedian(
+            flat_samples,
+            axis=0,
+        )
+
+    # Do a leastsq fit
+    elif fit_method == "leastsq":
+
+        # If we already have a p0, then we don't need to run this
+        if p0_fit is not None:
+            parameter_median = p0_fit
+        else:
+            parameter_median = get_p0_lmfit(
+                data,
+                error,
+                n_comp=n_comp,
+            )
+
+    else:
+        raise ValueError(f"fit_method should be one of {ALLOWED_FIT_METHODS}")
+
+    return parameter_median
+
+
 def delta_bic_looper(
     data,
     error,
     fit_method="mcmc",
     initial_n_comp=None,
+    initial_pars=None,
     save=False,
     overwrite=True,
     progress=False,
@@ -651,6 +739,8 @@ def delta_bic_looper(
             Defaults to "mcmc".
         initial_n_comp: Initial guess at number of components.
             Defaults to None.
+        initial_pars: Initial guess at parameters.
+            Defaults to None.
         save: Whether to save out or not, defaults to False
         overwrite: Whether to overwrite existing fits. Defaults to False
         progress: Whether to display progress bars or not. Defaults to False
@@ -661,7 +751,6 @@ def delta_bic_looper(
 
     delta_bic = np.inf
     delta_aic = np.inf
-    parameter_median_old = None
     sampler_old = None
     sampler = None
     best_fit_pars = None
@@ -688,40 +777,23 @@ def delta_bic_looper(
         # Start with an initial guess of component numbers
         n_comp = int(initial_n_comp)
 
-        # If we're doing MCMC
-        if fit_method == "mcmc":
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                sampler = run_mcmc(
-                    data,
-                    error,
-                    n_comp=n_comp,
-                    save=save,
-                    overwrite=overwrite,
-                    progress=progress,
-                )
+        # If we have initial number of components but not parameters,
+        # then calculate them
+        if initial_pars is None:
 
-            # Get flat samples and calculate median parameters
-            flat_samples = get_samples(
-                sampler,
-                burn_in_frac=glob_config["burn_in"],
-                thin_frac=glob_config["thin"],
-            )
-            parameter_median = np.nanmedian(
-                flat_samples,
-                axis=0,
-            )
-
-        # Do a leastsq fit
-        elif fit_method == "leastsq":
-            parameter_median = get_p0_lmfit(
+            parameter_median = get_parameters_from_fitting(
                 data,
                 error,
                 n_comp=n_comp,
+                fit_method=fit_method,
+                save=save,
+                overwrite=overwrite,
+                progress=progress,
             )
 
+        # Else, take the passed parameters
         else:
-            raise ValueError(f"fit_method should be one of {ALLOWED_FIT_METHODS}")
+            parameter_median = copy.deepcopy(initial_pars)
 
         # Calculate goodness of fit, pull out likelihood/BIC/AIC
         gof = calculate_goodness_of_fit(
@@ -750,40 +822,15 @@ def delta_bic_looper(
         # Increase the number of components, refit
         n_comp += 1
 
-        # If we're doing MCMC
-        if fit_method == "mcmc":
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                sampler = run_mcmc(
-                    data,
-                    error,
-                    n_comp=n_comp,
-                    save=save,
-                    overwrite=overwrite,
-                    progress=progress,
-                )
-
-            # Get flat samples and calculate median parameters
-            flat_samples = get_samples(
-                sampler,
-                burn_in_frac=glob_config["burn_in"],
-                thin_frac=glob_config["thin"],
-            )
-            parameter_median = np.nanmedian(
-                flat_samples,
-                axis=0,
-            )
-
-        # Do a leastsq fit
-        elif fit_method == "leastsq":
-            parameter_median = get_p0_lmfit(
-                data,
-                error,
-                n_comp=n_comp,
-            )
-
-        else:
-            raise ValueError(f"fit_method should be one of {ALLOWED_FIT_METHODS}")
+        parameter_median = get_parameters_from_fitting(
+            data,
+            error,
+            n_comp=n_comp,
+            fit_method=fit_method,
+            save=save,
+            overwrite=overwrite,
+            progress=progress,
+        )
 
         # Calculate goodness of fit, pull out likelihood/BIC/AIC
         gof = calculate_goodness_of_fit(
@@ -881,36 +928,16 @@ def delta_bic_looper(
                 )
                 p0 = np.delete(parameter_median, idx_to_delete)
 
-                # If we're doing MCMC
-                if fit_method == "mcmc":
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        sampler = run_mcmc(
-                            data,
-                            error,
-                            n_comp=n_comp,
-                            save=save,
-                            overwrite=overwrite,
-                            progress=progress,
-                            p0_fit=p0,
-                        )
-
-                    # Get flat samples and calculate median parameters
-                    flat_samples = get_samples(
-                        sampler,
-                        burn_in_frac=glob_config["burn_in"],
-                        thin_frac=glob_config["thin"],
-                    )
-                    parameter_median = np.nanmedian(flat_samples, axis=0)
-
-                # If doing a leastsq fit, we already have p0
-                elif fit_method == "leastsq":
-                    parameter_median = p0
-
-                else:
-                    raise ValueError(
-                        f"fit_method should be one of {ALLOWED_FIT_METHODS}"
-                    )
+                parameter_median = get_parameters_from_fitting(
+                    data,
+                    error,
+                    n_comp=n_comp,
+                    p0_fit=p0,
+                    fit_method=fit_method,
+                    save=save,
+                    overwrite=overwrite,
+                    progress=progress,
+                )
 
                 # Calculate goodness of fit, pull out likelihood/BIC/AIC
                 gof = calculate_goodness_of_fit(
@@ -1782,7 +1809,6 @@ class HyperfineFitter:
         self.downsampled_data = np.array([])
         self.downsampled_error = np.array([])
         self.downsampled_mask = np.array([])
-        self.initial_n_comp = np.array([])
 
         with open(CONFIG_DEFAULT_PATH, "rb") as f:
             config_defaults = tomllib.load(f)
@@ -2431,6 +2457,29 @@ class HyperfineFitter:
         global radex_grid
         radex_grid = ds
 
+    def get_props(
+        self,
+        fit_dict,
+    ):
+        """Get properties out from a fit dictionary
+
+        Args:
+            fit_dict: Dictionary of parameters
+        """
+
+        # Only do this if we actually have a fitted number of components
+        if fit_dict.get("n_comp", 0) > 0:
+            props = [
+                float(fit_dict["props"][p][n])
+                for n in range(fit_dict["n_comp"])
+                for p in self.props
+            ]
+
+        else:
+            props = []
+
+        return props
+
     def downsample_fitter(
         self,
         fit_dict_filename=None,
@@ -2506,7 +2555,7 @@ class HyperfineFitter:
         else:
             mcfine_output = load_pkl(f"{mcfine_output_filename}.pkl")
 
-        # Get n_comp out and sample back to the original grid. If we've
+        # Get n_comp and parameters out and sample back to the original grid. If we've
         # got the info in the fit dict, this is trivial
         if "fit" in mcfine_output:
 
@@ -2519,11 +2568,22 @@ class HyperfineFitter:
                     for j in range(downsampled_data.shape[2])
                 ]
             ).T
+            theta = np.array(
+                [
+                    [
+                        self.get_props(mcfine_output["fit"].get(i, {}).get(j, {}))
+                        for i in range(downsampled_data.shape[1])
+                    ]
+                    for j in range(downsampled_data.shape[2])
+                ],
+                dtype=list,
+            ).T
 
         # Otherwise, loop over files and pull out info
         else:
 
             n_comp = np.zeros(downsampled_data.shape[1:])
+            theta = np.empty(downsampled_data.shape[1:], dtype=list)
 
             if fit_dict_filename is None:
                 fit_dict_filename = get_dict_val(
@@ -2543,6 +2603,10 @@ class HyperfineFitter:
                         fit_dict = load_pkl(fit_dict_f)
 
                         n_comp[i, j] = fit_dict["n_comp"]
+                        theta[i, j] = self.get_props(fit_dict)
+
+                    else:
+                        theta[i, j] = []
 
         # Get indices for the downsampled and upsampled arrays
         i_us = np.arange(self.data.shape[1])
@@ -2551,6 +2615,7 @@ class HyperfineFitter:
         j_ds = np.arange(downsample_factor, self.data.shape[2], downsample_factor)
 
         n_comp_upsampled = np.zeros(self.data.shape[1:])
+        theta_upsampled = np.empty(self.data.shape[1:], dtype=list)
 
         i_split = np.array_split(i_us, i_ds)
         j_split = np.array_split(j_us, j_ds)
@@ -2567,10 +2632,13 @@ class HyperfineFitter:
                     i_idx, j_idx
                 ]
 
-        self.initial_n_comp = copy.deepcopy(n_comp_upsampled)
+                for i_t in np.arange(i_low, i_high + 1):
+                    for j_t in np.arange(j_low, j_high + 1):
+                        theta_upsampled[i_t, j_t] = theta[i_idx, j_idx]
 
-        global glob_initial_n_comp
-        glob_initial_n_comp = self.initial_n_comp
+        global glob_initial_n_comp, glob_initial_theta
+        glob_initial_n_comp = copy.deepcopy(n_comp_upsampled)
+        glob_initial_theta = copy.deepcopy(theta_upsampled)
 
         return True
 
@@ -2933,11 +3001,7 @@ class HyperfineFitter:
                             fit_params[fit_params_key].update(cutout_fit_dict)
 
                             # Pull out the parameters
-                            theta = [
-                                float(cutout_fit_dict["props"][p][n])
-                                for n in range(cutout_fit_dict["n_comp"])
-                                for p in self.props
-                            ]
+                            theta = self.get_props(cutout_fit_dict)
                             fit_params[fit_params_key]["theta"] = theta
 
                         n_comp_new = fit_params[fit_params_key]["n_comp"]
@@ -2998,11 +3062,7 @@ class HyperfineFitter:
                     fit_params[fit_param_key].update(updated_fit_dict)
 
                     # Pull out parameters
-                    theta = [
-                        float(updated_fit_dict["props"][p][n])
-                        for n in range(updated_fit_dict["n_comp"])
-                        for p in self.props
-                    ]
+                    theta = self.get_props(updated_fit_dict)
                     fit_params[fit_param_key]["theta"] = copy.deepcopy(theta)
 
                     # Update goodness of fit
