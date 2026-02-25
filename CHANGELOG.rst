@@ -3,6 +3,12 @@ Changelog
 #########
 
 ================
+0.5 (Unreleased)
+================
+
+* Pass parameters along to initial guess in the BIC looper, not just the number of components
+
+================
 0.4 (2026-02-11)
 ================
 
