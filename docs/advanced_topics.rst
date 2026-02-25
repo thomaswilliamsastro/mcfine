@@ -20,8 +20,8 @@ can speed up the fitting by a significant amount (15% or more). For this, we off
 a "downsampling" fitter, which will rebin the data in the x/y axis by a factor (default 10)
 and fit these, before passing those to the full resolution fitting. This can also help to
 improve the fits in areas of low signal-to-noise, but generally keeps the fit quality the same.
-Note that by doing this, the only thing passed to the fitter is the number of components. It will
-still then fit additional components and remove them independently per-spaxel.
+Note that by doing this, the best-fit parameters for the downsampled data are passed to the fitter
+as an initial guess. It will still then fit additional components and remove them independently per-spaxel.
 
 .. code-block:: python
 
