@@ -39,7 +39,7 @@ dependencies = [
     "numpy == 2.4.6",
     "scipy == 1.17.1",
     "spectral_cube == 0.6.7",
-    "specutils == 2.3.0",
+    "specutils == 2.4.0",
     "threadpoolctl == 3.6.0",
     "tqdm == 4.68.4",
     "xarray == 2026.4.0",
