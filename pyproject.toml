@@ -41,7 +41,7 @@ dependencies = [
     "spectral_cube == 0.6.7",
     "specutils == 2.3.0",
     "threadpoolctl == 3.6.0",
-    "tqdm == 4.67.3",
+    "tqdm == 4.68.2",
     "xarray == 2026.2.0",
 ]
 
