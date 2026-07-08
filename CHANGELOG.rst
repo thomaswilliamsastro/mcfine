@@ -7,6 +7,11 @@ Changelog
 ================
 
 * Pass parameters along to initial guess in the BIC looper, not just the number of components
+* Ensure data is properly converted to K and km/s if loading in spectral cube
+* Make sure any 0s are set to NaNs in the data array
+* Add HNCO(4-3) to the line list
+* Increase maximum number of lmfit iterations, to avoid crashes with high-parameter models
+* Suppress warnings in lmfit minimize
 
 ================
 0.4 (2026-02-11)
