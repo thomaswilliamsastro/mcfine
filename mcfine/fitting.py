@@ -1199,6 +1199,9 @@ def get_p0_lmfit(
         for i in range(n_comp):
             p0[prop_len * i + vel_idx] += i * dv
 
+        # Set a high number of max function evaluations, since very high-parameter fits can get stuck
+        max_nfev = 10000 * (len(p0) + 1)
+
         params = Parameters()
         p0_idx = 0
         for i in range(n_comp):
@@ -1212,22 +1215,25 @@ def get_p0_lmfit(
                 p0_idx += 1
 
         # Use lmfit to get an initial fit
-        lmfit_result = minimize(
-            fcn=initial_lmfit,
-            params=params,
-            args=(
-                data[good_idx],
-                error[good_idx],
-                glob_vel[good_idx],
-                glob_config["strength_lines"],
-                glob_config["v_lines"],
-                glob_config["props"],
-                n_comp,
-                glob_config["fit_type"],
-                True,
-            ),
-            **kwargs,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            lmfit_result = minimize(
+                fcn=initial_lmfit,
+                params=params,
+                args=(
+                    data[good_idx],
+                    error[good_idx],
+                    glob_vel[good_idx],
+                    glob_config["strength_lines"],
+                    glob_config["v_lines"],
+                    glob_config["props"],
+                    n_comp,
+                    glob_config["fit_type"],
+                    True,
+                ),
+                max_nfev=max_nfev,
+                **kwargs,
+            )
 
         p0_fit = np.array(
             [lmfit_result.params[key].value for key in lmfit_result.params]
@@ -1304,23 +1310,29 @@ def get_p0_lmfit(
                     max=bounds[j][1],
                 )
 
+            # Set a high number of max function evaluations, since very high-parameter fits can get stuck
+            max_nfev = 10000 * (len(params) + 1)
+
             # Get a fit to the actual data
-            lmfit_result = minimize(
-                fcn=initial_lmfit,
-                params=params,
-                args=(
-                    data[good_idx],
-                    error[good_idx],
-                    glob_vel[good_idx],
-                    glob_config["strength_lines"],
-                    glob_config["v_lines"],
-                    glob_config["props"],
-                    comp + 1,
-                    glob_config["fit_type"],
-                    True,
-                ),
-                **kwargs,
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                lmfit_result = minimize(
+                    fcn=initial_lmfit,
+                    params=params,
+                    args=(
+                        data[good_idx],
+                        error[good_idx],
+                        glob_vel[good_idx],
+                        glob_config["strength_lines"],
+                        glob_config["v_lines"],
+                        glob_config["props"],
+                        comp + 1,
+                        glob_config["fit_type"],
+                        True,
+                    ),
+                    max_nfev=max_nfev,
+                    **kwargs,
+                )
 
             p0_fit = np.array(
                 [lmfit_result.params[key].value for key in lmfit_result.params]
@@ -1775,24 +1787,44 @@ class HyperfineFitter:
         wcs = None
         wcs_2d = None
         if isinstance(data, str):
-            data = SpectralCube.read(data)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                data = SpectralCube.read(data)
+            data.allow_huge_operations = True
 
             # Get WCS out
             wcs = data.wcs
             wcs_2d = data[0, :, :].wcs
 
             # Get the velocity axis out
-            vel = data.spectral_axis.to(u.km / u.s).value
+            data = data.with_spectral_unit(
+                u.km / u.s,
+                velocity_convention="radio",
+            )
+            vel = data.spectral_axis.value
 
             # Convert to K, pull out values
-            data = data.unmasked_data[:].to(u.K).value
+            data = data.to(u.K)
+            data = data.unmasked_data[:].value
 
         # Load in the error spectral cube
         if isinstance(error, str):
-            error = SpectralCube.read(error)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                error = SpectralCube.read(error)
+            error.allow_huge_operations = True
 
             # Convert to K, pull out values
-            error = error.unmasked_data[:].to(u.K).value
+            error = error.to(u.K)
+            error = error.unmasked_data[:].value
+
+        # Set any 0s to NaNs if they lurk around in the data array
+        data[data == 0] = np.nan
+
+        # Make sure we NaN the error map in the same places as the data
+        error[~np.isfinite(data)] = np.nan
 
         self.data = data
         self.error = error
@@ -2835,7 +2867,7 @@ class HyperfineFitter:
     ):
         """Loop over fits to encourage spatial coherence
 
-        This will loop over RA/Dec to potentially replace fits
+        This will loop over x/y to potentially replace fits
         with neighbouring fits. This helps to encourage spatial
         coherence and can also help in the case of catastrophic
         misfits
